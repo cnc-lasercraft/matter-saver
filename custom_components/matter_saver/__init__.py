@@ -1,0 +1,462 @@
+"""Matter Saver - Custom Component for Home Assistant."""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Any
+
+import aiohttp
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
+from .const import (
+    CONF_MATTER_URL,
+    DEFAULT_MATTER_URL,
+    DOMAIN,
+    SCAN_INTERVAL_SECONDS,
+)
+
+from datetime import datetime, timedelta, timezone
+
+_LOGGER = logging.getLogger(__name__)
+
+PLATFORMS = ["sensor"]
+
+type MatterSaverConfigEntry = ConfigEntry[MatterSaverCoordinator]
+
+
+class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """Coordinator to fetch data from Matter Server WebSocket API."""
+
+    def __init__(self, hass: HomeAssistant, url: str) -> None:
+        """Initialize the coordinator."""
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=DOMAIN,
+            update_interval=timedelta(seconds=SCAN_INTERVAL_SECONDS),
+        )
+        self.url = url
+        self._last_seen: dict[int, str] = {}  # node_id -> ISO timestamp
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch data from Matter Server."""
+        try:
+            return await self._fetch_matter_nodes()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as err:
+            raise UpdateFailed(f"Error communicating with Matter Server: {err}") from err
+
+    async def _fetch_matter_nodes(self) -> dict[str, Any]:
+        """Connect to Matter Server WebSocket and get all nodes."""
+        session = aiohttp.ClientSession()
+        try:
+            async with session.ws_connect(self.url, timeout=10) as ws:
+                # Matter Server sends server info on connect - read and discard
+                await asyncio.wait_for(ws.receive(), timeout=5)
+
+                # Send get_nodes command
+                request = {
+                    "message_id": "1",
+                    "command": "get_nodes",
+                }
+                await ws.send_json(request)
+
+                # Read response
+                msg = await asyncio.wait_for(ws.receive(), timeout=15)
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    return self._parse_nodes(data)
+
+                raise UpdateFailed(f"Unexpected WebSocket message type: {msg.type}")
+        finally:
+            await session.close()
+
+    def _build_node_device_map(self) -> dict[int, dict[str, str]]:
+        """Build a mapping of Matter node_id to HA device info.
+
+        The Matter integration uses identifiers like:
+        ("matter", "deviceid_<fabric>-<node_id_hex>-MatterNodeDevice")
+        """
+        node_map: dict[int, dict[str, Any]] = {}
+        dev_reg = dr.async_get(self.hass)
+        ent_reg = er.async_get(self.hass)
+        area_reg = ar.async_get(self.hass)
+
+        # Build area_id -> area_name lookup
+        area_names: dict[str, str] = {}
+        for area in area_reg.async_list_areas():
+            area_names[area.id] = area.name
+
+        # Build device_id -> update_available lookup
+        update_available: dict[str, bool] = {}
+        for entity in ent_reg.entities.values():
+            if entity.domain == "update" and entity.platform == "matter":
+                state = self.hass.states.get(entity.entity_id)
+                if state:
+                    update_available[entity.device_id] = state.state == "on"
+
+        for device in dev_reg.devices.values():
+            for domain, identifier in device.identifiers:
+                if domain != "matter":
+                    continue
+                # Extract node_id hex from identifier string
+                # Format: "deviceid_<fabric_hex>-<node_id_hex>-MatterNodeDevice"
+                parts = identifier.split("-")
+                if len(parts) >= 2:
+                    try:
+                        node_id = int(parts[1], 16)
+                        node_map[node_id] = {
+                            "name": device.name_by_user or device.name or "",
+                            "area": area_names.get(device.area_id, "") if device.area_id else "",
+                            "update_available": update_available.get(device.id, False),
+                        }
+                    except (ValueError, IndexError):
+                        continue
+        return node_map
+
+    def _parse_nodes(self, data: Any) -> dict[str, Any]:
+        """Parse the Matter Server response into structured data."""
+        node_device_map = self._build_node_device_map()
+        nodes = []
+        raw_nodes = []
+
+        # Matter Server returns result in different formats depending on version
+        if isinstance(data, dict):
+            raw_nodes = data.get("result", data.get("nodes", []))
+        elif isinstance(data, list):
+            raw_nodes = data
+
+        if not isinstance(raw_nodes, list):
+            raw_nodes = []
+
+        online_count = 0
+        offline_count = 0
+
+        for node in raw_nodes:
+            if not isinstance(node, dict):
+                continue
+
+            node_id = node.get("node_id")
+            available = node.get("available", False)
+
+            # Extract basic info from node attributes
+            # Matter Server uses "endpoint/cluster/attribute" keys
+            # Cluster 40 = BasicInformation: 1=VendorName, 3=ProductName,
+            #   5=NodeLabel, 15=SerialNumber, 10=SoftwareVersionString
+            # Cluster 47 = PowerSource: 12=BatPercentRemaining
+            attributes = node.get("attributes", {})
+            device_info = node_device_map.get(node_id, {})
+            node_info = {
+                "node_id": node_id,
+                "device_name": device_info.get("name", ""),
+                "area": device_info.get("area", ""),
+                "update_available": device_info.get("update_available", False),
+                "available": available,
+                "vendor_name": self._get_matter_attr(attributes, 40, 1, ""),
+                "product_name": self._get_matter_attr(attributes, 40, 3, ""),
+                "node_label": self._get_matter_attr(attributes, 40, 5, ""),
+                "serial_number": self._get_matter_attr(attributes, 40, 15, ""),
+                "software_version_string": self._get_matter_attr(attributes, 40, 10, ""),
+                "date_commissioned": node.get("date_commissioned", ""),
+                "last_interview": node.get("last_interview", ""),
+            }
+
+            # Thread role (cluster 53, attr 1 = RoutingRole)
+            # 0=Unspecified, 1=Unassigned, 2=SleepyEndDevice,
+            # 3=EndDevice, 4=REED, 5=Router, 6=Leader
+            thread_role_map = {
+                0: "unspecified", 1: "unassigned", 2: "sed",
+                3: "end_device", 4: "reed", 5: "router", 6: "leader",
+            }
+            thread_role_val = self._get_matter_attr(attributes, 53, 1, None)
+            node_info["thread_role"] = thread_role_map.get(thread_role_val, "unknown")
+
+            # Thread neighbor/children count (cluster 53, attr 7 = NeighborTable)
+            # Each entry with field '13' = True is a child
+            neighbor_table = self._get_matter_attr(attributes, 53, 7, [])
+            if isinstance(neighbor_table, list):
+                node_info["neighbors"] = len(neighbor_table)
+                node_info["children"] = sum(
+                    1 for nb in neighbor_table
+                    if isinstance(nb, dict) and nb.get("13", False)
+                )
+            else:
+                node_info["neighbors"] = 0
+                node_info["children"] = 0
+
+            # Thread error counters (cluster 53)
+            tx_retry = self._get_matter_attr(attributes, 53, 25, 0) or 0
+            tx_err_cca = self._get_matter_attr(attributes, 53, 28, 0) or 0
+            tx_err_abort = self._get_matter_attr(attributes, 53, 29, 0) or 0
+            tx_err_busy = self._get_matter_attr(attributes, 53, 30, 0) or 0
+            rx_err_no_frame = self._get_matter_attr(attributes, 53, 42, 0) or 0
+            rx_err_unknown = self._get_matter_attr(attributes, 53, 43, 0) or 0
+            rx_err_invalid = self._get_matter_attr(attributes, 53, 44, 0) or 0
+            rx_err_sec = self._get_matter_attr(attributes, 53, 45, 0) or 0
+            rx_err_fcs = self._get_matter_attr(attributes, 53, 46, 0) or 0
+
+            total_errors = (tx_err_cca + tx_err_abort + tx_err_busy
+                            + rx_err_no_frame + rx_err_unknown
+                            + rx_err_invalid + rx_err_sec + rx_err_fcs)
+            node_info["errors"] = total_errors
+            node_info["tx_retries"] = tx_retry
+
+            # Build error comment
+            comments = []
+            if tx_err_cca > 10000:
+                comments.append("starke Kanalstörungen")
+            elif tx_err_cca > 1000:
+                comments.append("Kanalstörungen")
+            if tx_err_abort > 10000:
+                comments.append("viele Sendeabbrüche")
+            elif tx_err_abort > 1000:
+                comments.append("Sendeabbrüche")
+            if rx_err_no_frame > 10000:
+                comments.append("Empfangsprobleme")
+            elif rx_err_no_frame > 1000:
+                comments.append("leichte Empfangsprobleme")
+            if rx_err_unknown > 1000:
+                comments.append("unbekannte Nachbarn")
+            if rx_err_invalid > 1000:
+                comments.append("ungültige Quellen")
+            if tx_retry > 100000:
+                comments.append("sehr schlechte Verbindung")
+            elif tx_retry > 10000:
+                comments.append("schlechte Verbindung")
+            node_info["error_comment"] = ", ".join(comments) if comments else ""
+
+            # Try to get battery level (cluster 47, attr 12)
+            battery_percent = self._get_matter_attr(attributes, 47, 12, None)
+            if battery_percent is not None:
+                # Matter reports battery as 0-200 (2x percentage)
+                node_info["battery_percent"] = battery_percent / 2
+                node_info["power_source"] = "battery"
+            else:
+                node_info["battery_percent"] = None
+                node_info["power_source"] = "wired"
+
+            # Track last_seen: update when device is available
+            if available:
+                self._last_seen[node_id] = datetime.now(timezone.utc).isoformat()
+                online_count += 1
+            else:
+                offline_count += 1
+
+            # Store Thread topology info for path resolution
+            node_info["_parent_rloc_base"] = None
+            node_info["_parent_rssi"] = None
+            node_info["_parent_lqi"] = None
+            if thread_role_val in (2, 3) and isinstance(neighbor_table, list):
+                for nb in neighbor_table:
+                    if isinstance(nb, dict):
+                        rloc = nb.get("2", 0)
+                        if rloc:
+                            node_info["_parent_rloc_base"] = (rloc >> 10) * 1024
+                            node_info["_parent_rssi"] = nb.get("7")  # LastRssi
+                            node_info["_parent_lqi"] = nb.get("5")   # LQI
+                        break
+
+            # Store RLOC base for routers
+            node_info["_rloc_base"] = None
+            if thread_role_val in (5, 6):
+                # Method 1: from route table - own entry has Allocated=True,
+                # LinkEstablished=False, ExtAddress!=0
+                route_table = self._get_matter_attr(attributes, 53, 8, [])
+                if isinstance(route_table, list):
+                    for entry in route_table:
+                        if (isinstance(entry, dict)
+                                and entry.get("0", 0) != 0
+                                and entry.get("8", False)
+                                and not entry.get("9", False)):
+                            rloc = entry.get("1", 0)
+                            if rloc:
+                                node_info["_rloc_base"] = (rloc >> 10) * 1024
+                            break
+                # Method 2 fallback: infer from children RLOC
+                if node_info["_rloc_base"] is None and isinstance(neighbor_table, list):
+                    for nb in neighbor_table:
+                        if isinstance(nb, dict) and nb.get("13", False):
+                            child_rloc = nb.get("2", 0)
+                            if child_rloc:
+                                node_info["_rloc_base"] = (child_rloc >> 10) * 1024
+                            break
+
+            # Store router neighbor info (RSSI to other routers)
+            node_info["_router_neighbors"] = {}
+            if thread_role_val in (5, 6) and isinstance(neighbor_table, list):
+                for nb in neighbor_table:
+                    if isinstance(nb, dict) and not nb.get("13", False):
+                        nb_rloc = nb.get("2", 0)
+                        nb_base = (nb_rloc >> 10) * 1024 if nb_rloc else None
+                        if nb_base is not None:
+                            node_info["_router_neighbors"][nb_base] = {
+                                "rssi": nb.get("7"),
+                                "lqi": nb.get("5"),
+                            }
+
+            node_info["last_seen"] = self._last_seen.get(node_id, "")
+            nodes.append(node_info)
+
+        # Build RLOC base -> node info mapping
+        rloc_to_node: dict[int, dict[str, Any]] = {}
+        for n in nodes:
+            if n["_rloc_base"] is not None:
+                rloc_to_node[n["_rloc_base"]] = n
+
+        # Find the leader node (border router path ends here)
+        leader_rloc_base = None
+        for n in nodes:
+            if n.get("thread_role") == "leader" and n["_rloc_base"] is not None:
+                leader_rloc_base = n["_rloc_base"]
+                break
+
+        # Resolve parent and build route_path for each node
+        for n in nodes:
+            parent_rloc = n.pop("_parent_rloc_base", None)
+            parent_rssi = n.pop("_parent_rssi", None)
+            parent_lqi = n.pop("_parent_lqi", None)
+            rloc_base = n.pop("_rloc_base", None)
+            router_neighbors = n.pop("_router_neighbors", {})
+
+            if parent_rloc is not None and parent_rloc in rloc_to_node:
+                parent = rloc_to_node[parent_rloc]
+                n["parent_node_id"] = parent["node_id"]
+                n["parent_name"] = parent["device_name"]
+            else:
+                n["parent_node_id"] = None
+                n["parent_name"] = ""
+
+            # Build route_path: list of hops from device to HA
+            path = []
+            # Hop 0: the device itself
+            path.append({
+                "node_id": n["node_id"],
+                "name": n["device_name"],
+                "role": n["thread_role"],
+                "rssi": None, "lqi": None,
+            })
+
+            if n["thread_role"] in ("sed", "end_device"):
+                # Hop 1: parent router
+                if parent_rloc is not None and parent_rloc in rloc_to_node:
+                    pr = rloc_to_node[parent_rloc]
+                    path.append({
+                        "node_id": pr["node_id"],
+                        "name": pr["device_name"],
+                        "role": pr["thread_role"],
+                        "rssi": parent_rssi, "lqi": parent_lqi,
+                    })
+                    # Trace from parent router toward leader (max 5 hops)
+                    current_rloc = parent_rloc
+                    visited = {parent_rloc}
+                    for _ in range(5):
+                        if current_rloc == leader_rloc_base:
+                            break
+                        cur = rloc_to_node.get(current_rloc)
+                        if not cur:
+                            break
+                        cur_neighbors = cur.get("_router_neighbors", {})
+                        if not cur_neighbors:
+                            break
+                        # Find neighbor closest to leader (prefer leader directly)
+                        if leader_rloc_base in cur_neighbors:
+                            hop = cur_neighbors[leader_rloc_base]
+                            lr = rloc_to_node[leader_rloc_base]
+                            path.append({
+                                "node_id": lr["node_id"],
+                                "name": lr["device_name"],
+                                "role": lr["thread_role"],
+                                "rssi": hop.get("rssi"),
+                                "lqi": hop.get("lqi"),
+                            })
+                            break
+                        # Otherwise pick best LQI neighbor not yet visited
+                        best_rloc = None
+                        best_lqi = -1
+                        for nb_rloc, nb_info in cur_neighbors.items():
+                            if nb_rloc not in visited and (nb_info.get("lqi") or 0) > best_lqi:
+                                best_lqi = nb_info.get("lqi") or 0
+                                best_rloc = nb_rloc
+                        if best_rloc and best_rloc in rloc_to_node:
+                            visited.add(best_rloc)
+                            nr = rloc_to_node[best_rloc]
+                            hop_info = cur_neighbors[best_rloc]
+                            path.append({
+                                "node_id": nr["node_id"],
+                                "name": nr["device_name"],
+                                "role": nr["thread_role"],
+                                "rssi": hop_info.get("rssi"),
+                                "lqi": hop_info.get("lqi"),
+                            })
+                            current_rloc = best_rloc
+                        else:
+                            break
+
+            elif n["thread_role"] in ("router", "reed"):
+                # For routers, trace to leader
+                if rloc_base and rloc_base != leader_rloc_base:
+                    if leader_rloc_base in router_neighbors:
+                        hop = router_neighbors[leader_rloc_base]
+                        lr = rloc_to_node[leader_rloc_base]
+                        path.append({
+                            "node_id": lr["node_id"],
+                            "name": lr["device_name"],
+                            "role": lr["thread_role"],
+                            "rssi": hop.get("rssi"),
+                            "lqi": hop.get("lqi"),
+                        })
+
+            # Final hop: HA
+            path.append({"node_id": None, "name": "Home Assistant", "role": "ha", "rssi": None, "lqi": None})
+            n["route_path"] = path
+
+        # Sort: offline first, then by node_id
+        nodes.sort(key=lambda n: (n["available"], n["node_id"] or 0))
+
+        return {
+            "nodes": nodes,
+            "total": len(nodes),
+            "online": online_count,
+            "offline": offline_count,
+        }
+
+    @staticmethod
+    def _get_matter_attr(
+        attributes: dict, cluster_id: int, attr_id: int, default: Any
+    ) -> Any:
+        """Extract a Matter attribute from endpoint/cluster/attribute keyed dict.
+
+        Matter Server uses keys like "0/40/1" meaning endpoint 0, cluster 40,
+        attribute 1. We search all endpoints for the given cluster/attribute.
+        """
+        for key, value in attributes.items():
+            parts = str(key).split("/")
+            if len(parts) == 3:
+                try:
+                    if int(parts[1]) == cluster_id and int(parts[2]) == attr_id:
+                        return value
+                except (ValueError, IndexError):
+                    continue
+        return default
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) -> bool:
+    """Set up Matter Saver from a config entry."""
+    url = entry.data.get(CONF_MATTER_URL, DEFAULT_MATTER_URL)
+
+    coordinator = MatterSaverCoordinator(hass, url)
+    await coordinator.async_config_entry_first_refresh()
+
+    entry.runtime_data = coordinator
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) -> bool:
+    """Unload a config entry."""
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

@@ -1,4 +1,4 @@
-"""Sensor platform for Matter Monitor."""
+"""Sensor platform for Matter Saver."""
 from __future__ import annotations
 
 from typing import Any
@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import MatterMonitorCoordinator
+from . import MatterSaverCoordinator
 from .const import DOMAIN
 
 
@@ -18,8 +18,8 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Matter Monitor sensors."""
-    coordinator: MatterMonitorCoordinator = entry.runtime_data
+    """Set up Matter Saver sensors."""
+    coordinator: MatterSaverCoordinator = entry.runtime_data
     async_add_entities([
         MatterDeviceCountSensor(coordinator, entry),
         MatterOnlineSensor(coordinator, entry),
@@ -27,27 +27,27 @@ async def async_setup_entry(
     ])
 
 
-class MatterMonitorBaseSensor(CoordinatorEntity[MatterMonitorCoordinator], SensorEntity):
-    """Base class for Matter Monitor sensors."""
+class MatterSaverBaseSensor(CoordinatorEntity[MatterSaverCoordinator], SensorEntity):
+    """Base class for Matter Saver sensors."""
 
     _attr_has_entity_name = True
 
     def __init__(
-        self, coordinator: MatterMonitorCoordinator, entry: ConfigEntry
+        self, coordinator: MatterSaverCoordinator, entry: ConfigEntry
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._entry = entry
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": "Matter Monitor",
-            "manufacturer": "Matter Monitor",
+            "name": "Matter Saver",
+            "manufacturer": "Matter Saver",
             "model": "Matter Device Monitor",
             "sw_version": "0.1.0",
         }
 
 
-class MatterDeviceCountSensor(MatterMonitorBaseSensor):
+class MatterDeviceCountSensor(MatterSaverBaseSensor):
     """Sensor showing total Matter device count with details as attributes."""
 
     _attr_name = "Devices"
@@ -56,7 +56,7 @@ class MatterDeviceCountSensor(MatterMonitorBaseSensor):
     _attr_native_unit_of_measurement = "devices"
 
     def __init__(
-        self, coordinator: MatterMonitorCoordinator, entry: ConfigEntry
+        self, coordinator: MatterSaverCoordinator, entry: ConfigEntry
     ) -> None:
         """Initialize."""
         super().__init__(coordinator, entry)
@@ -83,11 +83,22 @@ class MatterDeviceCountSensor(MatterMonitorBaseSensor):
         for node in nodes:
             entry = {
                 "node_id": node["node_id"],
-                "name": node.get("node_label") or node.get("product_name") or f"Node {node['node_id']}",
-                "status": "online" if node["available"] else "offline",
-                "vendor": node.get("vendor_name", ""),
+                "name": node.get("device_name") or node.get("node_label") or node.get("product_name") or f"Node {node['node_id']}",
+                "area": node.get("area", ""),
                 "product": node.get("product_name", ""),
+                "status": "online" if node["available"] else "offline",
                 "power": node.get("power_source", "unknown"),
+                "firmware": node.get("software_version_string", ""),
+                "update_available": node.get("update_available", False),
+                "thread_role": node.get("thread_role", "unknown"),
+                "neighbors": node.get("neighbors", 0),
+                "children": node.get("children", 0),
+                "errors": node.get("errors", 0),
+                "error_comment": node.get("error_comment", ""),
+                "parent": node.get("parent_name", ""),
+                "parent_node_id": node.get("parent_node_id"),
+                "route_path": node.get("route_path", []),
+                "last_seen": node.get("last_seen", ""),
             }
             if node.get("battery_percent") is not None:
                 entry["battery"] = node["battery_percent"]
@@ -100,7 +111,7 @@ class MatterDeviceCountSensor(MatterMonitorBaseSensor):
         }
 
 
-class MatterOnlineSensor(MatterMonitorBaseSensor):
+class MatterOnlineSensor(MatterSaverBaseSensor):
     """Sensor showing online Matter device count."""
 
     _attr_name = "Online"
@@ -109,7 +120,7 @@ class MatterOnlineSensor(MatterMonitorBaseSensor):
     _attr_native_unit_of_measurement = "devices"
 
     def __init__(
-        self, coordinator: MatterMonitorCoordinator, entry: ConfigEntry
+        self, coordinator: MatterSaverCoordinator, entry: ConfigEntry
     ) -> None:
         """Initialize."""
         super().__init__(coordinator, entry)
@@ -123,7 +134,7 @@ class MatterOnlineSensor(MatterMonitorBaseSensor):
         return self.coordinator.data.get("online", 0)
 
 
-class MatterOfflineSensor(MatterMonitorBaseSensor):
+class MatterOfflineSensor(MatterSaverBaseSensor):
     """Sensor showing offline Matter device count."""
 
     _attr_name = "Offline"
@@ -132,7 +143,7 @@ class MatterOfflineSensor(MatterMonitorBaseSensor):
     _attr_native_unit_of_measurement = "devices"
 
     def __init__(
-        self, coordinator: MatterMonitorCoordinator, entry: ConfigEntry
+        self, coordinator: MatterSaverCoordinator, entry: ConfigEntry
     ) -> None:
         """Initialize."""
         super().__init__(coordinator, entry)

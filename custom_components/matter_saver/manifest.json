@@ -1,6 +1,6 @@
 {
-  "domain": "matter_monitor",
-  "name": "Matter Monitor",
+  "domain": "matter_saver",
+  "name": "Matter Saver",
   "codeowners": [],
   "config_flow": true,
   "documentation": "",

@@ -1,4 +1,4 @@
-"""Config flow for Matter Monitor."""
+"""Config flow for Matter Saver."""
 from __future__ import annotations
 
 import asyncio
@@ -15,8 +15,8 @@ from .const import CONF_MATTER_URL, DEFAULT_MATTER_URL, DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 
-class MatterMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Matter Monitor."""
+class MatterSaverConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle a config flow for Matter Saver."""
 
     VERSION = 1
 
@@ -34,7 +34,7 @@ class MatterMonitorConfigFlow(ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(DOMAIN)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
-                    title="Matter Monitor",
+                    title="Matter Saver",
                     data=user_input,
                 )
             errors["base"] = "cannot_connect"
