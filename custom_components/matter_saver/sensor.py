@@ -24,6 +24,7 @@ async def async_setup_entry(
         MatterDeviceCountSensor(coordinator, entry),
         MatterOnlineSensor(coordinator, entry),
         MatterOfflineSensor(coordinator, entry),
+        MatterActivityLogSensor(coordinator, entry),
     ])
 
 
@@ -98,6 +99,10 @@ class MatterDeviceCountSensor(MatterSaverBaseSensor):
                 "parent": node.get("parent_name", ""),
                 "parent_node_id": node.get("parent_node_id"),
                 "route_path": node.get("route_path", []),
+                "offline_7d_count": node.get("offline_7d_count", 0),
+                "offline_7d_minutes": node.get("offline_7d_minutes", 0),
+                "offline_30d_count": node.get("offline_30d_count", 0),
+                "offline_30d_minutes": node.get("offline_30d_minutes", 0),
                 "last_seen": node.get("last_seen", ""),
             }
             if node.get("battery_percent") is not None:
@@ -155,3 +160,29 @@ class MatterOfflineSensor(MatterSaverBaseSensor):
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("offline", 0)
+
+
+class MatterActivityLogSensor(MatterSaverBaseSensor):
+    """Sensor providing the activity log."""
+
+    _attr_name = "Activity Log"
+    _attr_icon = "mdi:text-box-outline"
+
+    def __init__(
+        self, coordinator: MatterSaverCoordinator, entry: ConfigEntry
+    ) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_activity_log"
+
+    @property
+    def native_value(self) -> int:
+        """Return number of log entries."""
+        return len(self.coordinator.activity_log)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return log entries."""
+        return {
+            "entries": self.coordinator.activity_log,
+        }

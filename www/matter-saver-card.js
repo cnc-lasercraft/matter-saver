@@ -112,6 +112,13 @@ class MatterSaverCard extends HTMLElement {
           .ms-action-status.success { background: #1b5e2033; color: #4caf50; }
           .ms-action-status.error { background: #b7140033; color: #f44336; }
           .ms-action-status.loading { background: #01579b33; color: #03a9f4; }
+          .ms-suggestion {
+            margin: 12px 0; padding: 12px; border-radius: 10px; font-size: 0.85em; line-height: 1.5;
+            background: #01579b22; border-left: 3px solid #03a9f4;
+          }
+          .ms-suggestion.warn {
+            background: #e6510022; border-left-color: #ff9800;
+          }
 
           /* Route Modal */
           .ms-modal-overlay {
@@ -291,8 +298,12 @@ class MatterSaverCard extends HTMLElement {
     const modal = this.querySelector("#ms-action-modal");
 
     titleEl.textContent = device.name || `Node ${nodeId}`;
-    statusEl.className = "ms-action-status";
-    statusEl.textContent = "";
+    // Preserve status message during refresh
+    if (!this._keepStatus) {
+      statusEl.className = "ms-action-status";
+      statusEl.textContent = "";
+    }
+    this._keepStatus = false;
 
     // Device details table
     const rows = [
@@ -309,9 +320,69 @@ class MatterSaverCard extends HTMLElement {
     ];
     if (device.error_comment) rows.push(["Diagnose", device.error_comment]);
 
+    // Offline history stats
+    if (device.offline_7d_count > 0 || device.offline_30d_count > 0) {
+      const fmt = (min) => min < 60 ? `${min}m` : min < 1440 ? `${Math.round(min/60)}h` : `${(min/1440).toFixed(1)}d`;
+      if (device.offline_7d_count > 0)
+        rows.push(["Offline 7d", `${device.offline_7d_count}x, total ${fmt(device.offline_7d_minutes)}`]);
+      if (device.offline_30d_count > 0)
+        rows.push(["Offline 30d", `${device.offline_30d_count}x, total ${fmt(device.offline_30d_minutes)}`]);
+    }
+
+    // Get repair history for this node from activity log
+    const logState = this._hass.states["sensor.matter_saver_activity_log"];
+    const allEntries = logState ? (logState.attributes.entries || []) : [];
+    const nodeHistory = allEntries.filter(e => e.node_id === nodeId);
+
+    // Analyze what was already tried
+    const triedPing = nodeHistory.some(e => e.message && e.message.includes("Ping"));
+    const pingOk = nodeHistory.some(e => e.level === "success" && e.message && e.message.includes("Ping"));
+    const pingFail = nodeHistory.some(e => e.level === "error" && e.message && e.message.includes("Ping"));
+    const triedInterview = nodeHistory.some(e => e.message && e.message.includes("Interview"));
+    const interviewOk = nodeHistory.some(e => e.level === "success" && e.message && e.message.includes("Interview"));
+    const interviewFail = nodeHistory.some(e => e.level === "error" && e.message && e.message.includes("Interview"));
+    const triedReset = nodeHistory.some(e => e.message && e.message.includes("Reset"));
+
+    // Build smart suggestion
+    let suggestion = "";
+    if (device.status === "offline") {
+      if (!triedPing) {
+        suggestion = `<div class="ms-suggestion">\uD83D\uDCA1 <strong>Empfehlung:</strong> Zuerst Ping versuchen um zu prüfen ob das Gerät auf Thread-Ebene erreichbar ist.</div>`;
+      } else if (pingOk && !triedInterview) {
+        suggestion = `<div class="ms-suggestion">\uD83D\uDCA1 <strong>Empfehlung:</strong> Ping war erfolgreich - das Gerät ist auf Thread-Ebene erreichbar. Re-Interview versuchen um die Matter-Verbindung neu aufzubauen.</div>`;
+      } else if (pingOk && interviewFail) {
+        suggestion = `<div class="ms-suggestion warn">\u26A0\uFE0F <strong>Empfehlung:</strong> Ping OK aber Re-Interview gescheitert - die Matter-Application reagiert nicht.<br><br>1. Matter Server Addon neustarten: <button class="ms-action-btn" id="ms-restart-addon" style="background:#b71c1c;color:#fff;display:inline-flex;padding:6px 14px;font-size:0.85em;margin:4px 0">\u26A1 Matter Server Restart</button><br>2. Falls das nicht hilft: Gerät physisch vom Strom trennen (5 Sek) und wieder einstecken</div>`;
+      } else if (pingFail) {
+        suggestion = `<div class="ms-suggestion warn">\u26A0\uFE0F <strong>Empfehlung:</strong> Ping fehlgeschlagen - das Gerät ist nicht erreichbar. Mögliche Ursachen:<br>1. Kein Strom \u2192 Stecker/Sicherung prüfen<br>2. Ausserhalb Thread-Reichweite \u2192 näher an einen Router stellen<br>3. Hardware-Defekt</div>`;
+      }
+    } else if (device.errors > 10000) {
+      if (!triedReset) {
+        suggestion = `<div class="ms-suggestion">\uD83D\uDCA1 <strong>Empfehlung:</strong> Hohe Error-Zähler. Reset Counters ausführen und beobachten ob die Fehler wiederkommen. Falls ja, Gerät umplatzieren.</div>`;
+      } else {
+        suggestion = `<div class="ms-suggestion warn">\u26A0\uFE0F <strong>Empfehlung:</strong> Counter wurden bereits zurückgesetzt. Falls Fehler weiter steigen: Gerät steht vermutlich in einem Bereich mit starken Funkstörungen (WLAN, Mikrowelle). Umplatzieren oder Thread-Kanal prüfen.</div>`;
+      }
+    }
+
+    // Repair history HTML
+    let historyHtml = "";
+    if (nodeHistory.length > 0) {
+      const histIcons = {"action": "\u26A1", "success": "\u2705", "error": "\u274C", "info": "\uD83D\uDFE2", "warning": "\u26A0\uFE0F"};
+      historyHtml = `<div class="ms-repair-history">
+        <div style="font-weight:600;font-size:0.85em;margin:12px 0 6px;color:var(--secondary-text-color,#999)">REPAIR HISTORY</div>
+        ${nodeHistory.slice(0, 10).map(e => {
+          const ts = new Date(e.timestamp);
+          const time = ts.toLocaleTimeString("de-CH", {hour:"2-digit",minute:"2-digit"});
+          const date = ts.toLocaleDateString("de-CH");
+          const icon = histIcons[e.level] || "\u2139\uFE0F";
+          const color = e.level === "success" ? "#4caf50" : e.level === "error" ? "#f44336" : e.level === "action" ? "#ce93d8" : "#999";
+          return `<div style="display:flex;gap:8px;padding:3px 0;font-size:0.8em"><span>${icon}</span><span style="color:${color}">${this._escHtml(e.message)}</span><span style="color:var(--secondary-text-color,#666);margin-left:auto;white-space:nowrap">${date} ${time}</span></div>`;
+        }).join("")}
+      </div>`;
+    }
+
     detailsEl.innerHTML = `<table>${rows.map(([k, v]) =>
       `<tr><td>${k}</td><td>${this._escHtml(String(v))}</td></tr>`
-    ).join("")}</table>`;
+    ).join("")}</table>${suggestion}${historyHtml}`;
 
     // Action buttons
     buttonsEl.innerHTML = `
@@ -326,6 +397,12 @@ class MatterSaverCard extends HTMLElement {
     });
 
     modal.classList.add("open");
+
+    // Restart addon button (in suggestion)
+    const restartBtn = this.querySelector("#ms-restart-addon");
+    if (restartBtn) {
+      restartBtn.addEventListener("click", () => this._restartMatterAddon(nodeId));
+    }
   }
 
   async _executeAction(action, nodeId) {
@@ -347,7 +424,12 @@ class MatterSaverCard extends HTMLElement {
       "reset": "Reset Counters",
     };
 
-    statusEl.textContent = `${labels[action]} wird ausgeführt...`;
+    const hints = {
+      "ping": "Ping wird ausgeführt...",
+      "interview": "Re-Interview läuft, das kann bis zu 30 Sekunden dauern...",
+      "reset": "Error Counter werden zurückgesetzt...",
+    };
+    statusEl.textContent = hints[action] || `${labels[action]} wird ausgeführt...`;
 
     try {
       await this._hass.callService("matter_saver", serviceMap[action], { node_id: nodeId });
@@ -359,6 +441,34 @@ class MatterSaverCard extends HTMLElement {
     }
 
     buttons.forEach(b => b.disabled = false);
+
+    // Wait for log sensor to update, then refresh history + suggestion (keep status)
+    const refreshPopup = () => {
+      const modal = this.querySelector("#ms-action-modal");
+      if (modal && modal.classList.contains("open")) {
+        this._keepStatus = true;
+        this._showActionPopup(nodeId);
+      }
+    };
+    setTimeout(refreshPopup, 2000);
+    setTimeout(refreshPopup, 5000);
+  }
+
+  async _restartMatterAddon(nodeId) {
+    const statusEl = this.querySelector("#ms-action-status");
+    if (!confirm("Matter Server Addon neustarten?\n\nAlle Matter-Geräte werden kurzzeitig offline sein (30-60 Sek).")) return;
+
+    statusEl.className = "ms-action-status show loading";
+    statusEl.textContent = "Matter Server Addon wird neu gestartet, alle Geräte werden kurzzeitig offline...";
+
+    try {
+      await this._hass.callService("hassio", "addon_restart", { addon: "core_matter_server" });
+      statusEl.className = "ms-action-status show success";
+      statusEl.textContent = "Matter Server Addon neu gestartet. Geräte kommen in 1-5 Minuten zurück.";
+    } catch (err) {
+      statusEl.className = "ms-action-status show error";
+      statusEl.textContent = `Fehler: ${err.message || err}`;
+    }
   }
 
   _updateTable() {

@@ -12,6 +12,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -43,13 +44,175 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.url = url
         self._last_seen: dict[int, str] = {}  # node_id -> ISO timestamp
+        self._previous_status: dict[int, bool] = {}  # node_id -> available
+        self.activity_log: list[dict[str, Any]] = []
+        self.max_log_entries = 200
+        self._store = Store(hass, 1, f"{DOMAIN}_data")
+        self._store_loaded = False
+        # Offline history: node_id -> list of {"start": iso, "end": iso|None, "duration_min": int}
+        self.offline_history: dict[int, list[dict[str, Any]]] = {}
+        # Auto-recovery
+        self.auto_recovery_enabled = True
+        self._recovery_task: asyncio.Task | None = None
+        self._recovery_interval = 300  # 5 minutes
+
+    async def async_load_log(self) -> None:
+        """Load persistent data from storage."""
+        data = await self._store.async_load()
+        if data and isinstance(data, dict):
+            self.activity_log = data.get("entries", [])
+            self._last_seen = data.get("last_seen", {})
+            self.offline_history = {
+                int(k): v for k, v in data.get("offline_history", {}).items()
+            }
+            self.auto_recovery_enabled = data.get("auto_recovery", True)
+        self._store_loaded = True
+
+    async def _async_save_log(self) -> None:
+        """Save persistent data to storage."""
+        await self._store.async_save({
+            "entries": self.activity_log,
+            "last_seen": self._last_seen,
+            "offline_history": {str(k): v for k, v in self.offline_history.items()},
+            "auto_recovery": self.auto_recovery_enabled,
+        })
+
+    def add_log(self, level: str, node_id: int | None, name: str,
+                message: str) -> None:
+        """Add an entry to the activity log."""
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "node_id": node_id,
+            "name": name,
+            "message": message,
+        }
+        self.activity_log.insert(0, entry)
+        if len(self.activity_log) > self.max_log_entries:
+            self.activity_log = self.activity_log[:self.max_log_entries]
+        # Trigger immediate update so log sensor refreshes
+        if self.data is not None:
+            self.data["activity_log"] = self.activity_log
+            self.async_set_updated_data(self.data)
+        # Persist to disk
+        self.hass.async_create_task(self._async_save_log())
+
+    async def start_auto_recovery(self) -> None:
+        """Start the auto-recovery background task."""
+        if self._recovery_task is not None:
+            self._recovery_task.cancel()
+        self._recovery_task = self.hass.async_create_task(self._auto_recovery_loop())
+
+    async def stop_auto_recovery(self) -> None:
+        """Stop the auto-recovery background task."""
+        if self._recovery_task is not None:
+            self._recovery_task.cancel()
+            self._recovery_task = None
+
+    async def _auto_recovery_loop(self) -> None:
+        """Periodically try to recover offline nodes."""
+        while True:
+            await asyncio.sleep(self._recovery_interval)
+            if not self.auto_recovery_enabled or self.data is None:
+                continue
+            offline_nodes = [
+                n for n in self.data.get("nodes", [])
+                if not n["available"]
+            ]
+            for node in offline_nodes:
+                nid = node["node_id"]
+                name = node.get("device_name") or f"Node {nid}"
+                try:
+                    # Try ping first
+                    result = await self.send_matter_command(
+                        "ping_node", {"node_id": nid}
+                    )
+                    if isinstance(result, dict) and "error" in result:
+                        self.add_log("action", nid, name,
+                                     f"Auto-Recovery: Ping fehlgeschlagen")
+                        continue
+                    self.add_log("action", nid, name,
+                                 "Auto-Recovery: Ping OK, starte Re-Interview")
+                    # Ping worked, try interview
+                    result = await self.send_matter_command(
+                        "interview_node", {"node_id": nid}
+                    )
+                    if isinstance(result, dict) and "error" in result:
+                        self.add_log("error", nid, name,
+                                     f"Auto-Recovery: Re-Interview fehlgeschlagen")
+                    else:
+                        self.add_log("success", nid, name,
+                                     "Auto-Recovery: Re-Interview erfolgreich")
+                        await self.async_request_refresh()
+                except Exception:
+                    pass  # Don't crash the loop
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Matter Server."""
         try:
-            return await self._fetch_matter_nodes()
+            data = await self._fetch_matter_nodes()
         except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as err:
             raise UpdateFailed(f"Error communicating with Matter Server: {err}") from err
+
+        # Track status changes + offline history
+        now = datetime.now(timezone.utc).isoformat()
+        for node in data.get("nodes", []):
+            nid = node["node_id"]
+            available = node["available"]
+            name = node.get("device_name") or f"Node {nid}"
+            prev = self._previous_status.get(nid)
+
+            if prev is not None and prev != available:
+                if available:
+                    self.add_log("info", nid, name, "online")
+                    # Close open offline period
+                    if nid in self.offline_history:
+                        for period in self.offline_history[nid]:
+                            if period.get("end") is None:
+                                period["end"] = now
+                                start = datetime.fromisoformat(period["start"])
+                                end = datetime.fromisoformat(now)
+                                period["duration_min"] = int((end - start).total_seconds() / 60)
+                                break
+                else:
+                    self.add_log("warning", nid, name, "offline")
+                    # Start new offline period
+                    if nid not in self.offline_history:
+                        self.offline_history[nid] = []
+                    self.offline_history[nid].insert(0, {
+                        "start": now, "end": None, "duration_min": 0,
+                    })
+                    # Keep max 50 entries per node
+                    self.offline_history[nid] = self.offline_history[nid][:50]
+
+            self._previous_status[nid] = available
+
+        # Build offline stats per node
+        for node in data.get("nodes", []):
+            nid = node["node_id"]
+            history = self.offline_history.get(nid, [])
+            now_dt = datetime.now(timezone.utc)
+            week_ago = (now_dt - timedelta(days=7)).isoformat()
+            month_ago = (now_dt - timedelta(days=30)).isoformat()
+
+            week_events = [h for h in history if h["start"] >= week_ago]
+            month_events = [h for h in history if h["start"] >= month_ago]
+            week_dur = sum(h.get("duration_min", 0) for h in week_events)
+            month_dur = sum(h.get("duration_min", 0) for h in month_events)
+
+            # Check if currently in an open offline period
+            if history and history[0].get("end") is None:
+                start = datetime.fromisoformat(history[0]["start"])
+                week_dur += int((now_dt - start).total_seconds() / 60)
+                month_dur += int((now_dt - start).total_seconds() / 60)
+
+            node["offline_7d_count"] = len(week_events)
+            node["offline_7d_minutes"] = week_dur
+            node["offline_30d_count"] = len(month_events)
+            node["offline_30d_minutes"] = month_dur
+
+        data["activity_log"] = self.activity_log
+        return data
 
     async def _fetch_matter_nodes(self) -> dict[str, Any]:
         """Connect to Matter Server WebSocket and get all nodes."""
@@ -240,11 +403,16 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 node_info["battery_percent"] = None
                 node_info["power_source"] = "wired"
 
-            # Track last_seen: update when device is available
+            # Track last_seen: update when device is available,
+            # fallback to last_interview from Matter Server
             if available:
                 self._last_seen[node_id] = datetime.now(timezone.utc).isoformat()
                 online_count += 1
             else:
+                if node_id not in self._last_seen:
+                    last_interview = node.get("last_interview", "")
+                    if last_interview:
+                        self._last_seen[node_id] = last_interview
                 offline_count += 1
 
             # Store Thread topology info for path resolution
@@ -489,10 +657,18 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if args:
                     request["args"] = args
                 await ws.send_json(request)
-                msg = await asyncio.wait_for(ws.receive(), timeout=15)
+                msg = await asyncio.wait_for(ws.receive(), timeout=30)
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    return json.loads(msg.data)
+                    data = json.loads(msg.data)
+                    # Matter Server error responses
+                    if isinstance(data, dict) and "error_code" in data:
+                        return {"error": data.get("details", data.get("error_code", "Unknown error"))}
+                    return data
                 return {"error": f"Unexpected message type: {msg.type}"}
+        except asyncio.TimeoutError:
+            return {"error": "Timeout - Gerät antwortet nicht"}
+        except (aiohttp.ClientError, ConnectionError) as err:
+            return {"error": f"Verbindungsfehler: {err}"}
         finally:
             await session.close()
 
@@ -526,55 +702,58 @@ async def async_setup_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) 
     url = entry.data.get(CONF_MATTER_URL, DEFAULT_MATTER_URL)
 
     coordinator = MatterSaverCoordinator(hass, url)
+    await coordinator.async_load_log()
     await coordinator.async_config_entry_first_refresh()
 
     entry.runtime_data = coordinator
+    await coordinator.start_auto_recovery()
+
+    def _node_name(nid: int) -> str:
+        """Get device name for a node_id from coordinator data."""
+        if coordinator.data:
+            for n in coordinator.data.get("nodes", []):
+                if n["node_id"] == nid:
+                    return n.get("device_name") or f"Node {nid}"
+        return f"Node {nid}"
+
+    async def _run_action(
+        node_id: int, action_name: str, command: str,
+        args: dict[str, Any], success_msg: str,
+    ) -> None:
+        """Run a Matter command with logging and error propagation."""
+        from homeassistant.exceptions import HomeAssistantError
+        name = _node_name(node_id)
+        coordinator.add_log("action", node_id, name, f"{action_name} gestartet")
+        result = await coordinator.send_matter_command(command, args)
+        if isinstance(result, dict) and "error" in result:
+            error_msg = result["error"]
+            coordinator.add_log("error", node_id, name, f"{action_name} fehlgeschlagen: {error_msg}")
+            raise HomeAssistantError(f"{action_name} fehlgeschlagen: {error_msg}")
+        coordinator.add_log("success", node_id, name, success_msg)
 
     async def handle_ping_node(call: ServiceCall) -> None:
         """Ping a Matter node."""
         node_id = call.data["node_id"]
-        _LOGGER.info("Pinging Matter node %s", node_id)
-        result = await coordinator.send_matter_command(
-            "ping_node", {"node_id": node_id}
-        )
-        hass.bus.async_fire(f"{DOMAIN}_action_result", {
-            "action": "ping",
-            "node_id": node_id,
-            "result": result,
-        })
+        await _run_action(node_id, "Ping", "ping_node",
+                          {"node_id": node_id}, "Ping erfolgreich")
 
     async def handle_interview_node(call: ServiceCall) -> None:
         """Re-interview a Matter node."""
         node_id = call.data["node_id"]
-        _LOGGER.info("Re-interviewing Matter node %s", node_id)
-        result = await coordinator.send_matter_command(
-            "interview_node", {"node_id": node_id}
-        )
-        hass.bus.async_fire(f"{DOMAIN}_action_result", {
-            "action": "interview",
-            "node_id": node_id,
-            "result": result,
-        })
-        # Refresh data after interview
+        await _run_action(node_id, "Re-Interview", "interview_node",
+                          {"node_id": node_id}, "Re-Interview erfolgreich")
         await coordinator.async_request_refresh()
 
     async def handle_reset_counters(call: ServiceCall) -> None:
-        """Reset Thread diagnostic counters for a node via Matter cluster command."""
+        """Reset Thread diagnostic counters for a node."""
         node_id = call.data["node_id"]
-        _LOGGER.info("Resetting Thread counters for node %s", node_id)
-        # Send cluster command: endpoint 0, cluster 53, command 0 (ResetCounts)
-        result = await coordinator.send_matter_command(
-            "send_command", {
-                "node_id": node_id,
-                "endpoint_id": 0,
-                "cluster_id": 53,
-                "command_name": "ResetCounts",
-                "payload": {},
-            }
-        )
+        await _run_action(node_id, "Error Counter Reset", "send_command", {
+            "node_id": node_id, "endpoint_id": 0,
+            "cluster_id": 53, "command_name": "ResetCounts", "payload": {},
+        }, "Error Counter zurückgesetzt")
+        await coordinator.async_request_refresh()
         hass.bus.async_fire(f"{DOMAIN}_action_result", {
-            "action": "reset_counters",
-            "node_id": node_id,
+            "action": "reset_counters", "node_id": node_id,
             "result": result,
         })
         await coordinator.async_request_refresh()
@@ -595,6 +774,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) 
 
 async def async_unload_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) -> bool:
     """Unload a config entry."""
+    coordinator: MatterSaverCoordinator = entry.runtime_data
+    await coordinator.stop_auto_recovery()
     hass.services.async_remove(DOMAIN, "ping_node")
     hass.services.async_remove(DOMAIN, "interview_node")
     hass.services.async_remove(DOMAIN, "reset_counters")
