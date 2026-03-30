@@ -44,11 +44,11 @@ class MatterSaverMeshCard extends HTMLElement {
           .mm-title { font-size: 1.2em; font-weight: 500; }
           .mm-controls { display: flex; gap: 8px; }
           .mm-btn {
-            background: var(--card-background-color, #333); border: 1px solid var(--divider-color, #555);
-            color: var(--primary-text-color, #fff); padding: 4px 10px; border-radius: 6px;
-            cursor: pointer; font-size: 0.8em;
+            background: var(--card-background-color, #333); border: 2px solid var(--divider-color, #555);
+            color: var(--primary-text-color, #fff); padding: 8px 16px; border-radius: 10px;
+            cursor: pointer; font-size: 1.1em; font-weight: 600; min-width: 40px;
           }
-          .mm-btn:hover { border-color: var(--primary-color, #03a9f4); }
+          .mm-btn:hover { border-color: var(--primary-color, #03a9f4); background: var(--primary-color, #03a9f4)22; }
           .mm-legend { padding: 0 16px 8px; display: flex; gap: 16px; font-size: 0.8em; flex-wrap: wrap; }
           .mm-legend-item { display: flex; align-items: center; gap: 4px; }
           .mm-legend-dot { width: 12px; height: 12px; border-radius: 50%; }

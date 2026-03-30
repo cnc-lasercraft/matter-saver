@@ -111,6 +111,8 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _auto_recovery_loop(self) -> None:
         """Periodically try to recover offline nodes."""
+        # Wait for startup to complete before first recovery attempt
+        await asyncio.sleep(self._recovery_interval)
         while True:
             await asyncio.sleep(self._recovery_interval)
             if not self.auto_recovery_enabled or self.data is None:
