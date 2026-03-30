@@ -86,6 +86,32 @@ class MatterSaverCard extends HTMLElement {
           .ms-no-results td { text-align: center; padding: 20px; color: var(--secondary-text-color, #999); }
           .ms-parent-link { cursor: pointer; color: var(--primary-color, #03a9f4); text-decoration: underline; }
           .ms-parent-link:hover { opacity: 0.8; }
+          .ms-name-link { cursor: pointer; }
+          .ms-name-link:hover { color: var(--primary-color, #03a9f4); }
+
+          /* Action Modal */
+          .ms-action-details { margin-bottom: 16px; }
+          .ms-action-details table { width: 100%; font-size: 0.9em; }
+          .ms-action-details td { padding: 4px 8px; }
+          .ms-action-details td:first-child { color: var(--secondary-text-color, #999); width: 100px; }
+          .ms-action-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
+          .ms-action-btn {
+            padding: 10px 18px; border: none; border-radius: 10px; cursor: pointer;
+            font-size: 0.9em; font-weight: 500; display: flex; align-items: center; gap: 6px;
+            transition: opacity 0.2s;
+          }
+          .ms-action-btn:hover { opacity: 0.85; }
+          .ms-action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+          .ms-action-btn.ping { background: #1b5e20; color: #fff; }
+          .ms-action-btn.interview { background: #0d47a1; color: #fff; }
+          .ms-action-btn.reset { background: #e65100; color: #fff; }
+          .ms-action-status {
+            margin-top: 12px; padding: 10px; border-radius: 8px; font-size: 0.85em; display: none;
+          }
+          .ms-action-status.show { display: block; }
+          .ms-action-status.success { background: #1b5e2033; color: #4caf50; }
+          .ms-action-status.error { background: #b7140033; color: #f44336; }
+          .ms-action-status.loading { background: #01579b33; color: #03a9f4; }
 
           /* Route Modal */
           .ms-modal-overlay {
@@ -146,6 +172,15 @@ class MatterSaverCard extends HTMLElement {
             <div class="ms-route" id="ms-route"></div>
           </div>
         </div>
+        <div class="ms-modal-overlay" id="ms-action-modal">
+          <div class="ms-modal">
+            <button class="ms-modal-close" id="ms-action-modal-close">&times;</button>
+            <div class="ms-modal-title" id="ms-action-title"></div>
+            <div class="ms-action-details" id="ms-action-details"></div>
+            <div class="ms-action-buttons" id="ms-action-buttons"></div>
+            <div class="ms-action-status" id="ms-action-status"></div>
+          </div>
+        </div>
       </ha-card>
     `;
 
@@ -165,18 +200,28 @@ class MatterSaverCard extends HTMLElement {
       this._updateTable();
     });
 
-    // Route popup clicks (delegation on tbody)
+    // Table click delegation
     this.querySelector("#ms-tbody").addEventListener("click", (e) => {
-      const link = e.target.closest(".ms-parent-link");
-      if (!link) return;
-      const nodeId = parseInt(link.dataset.nodeId);
-      this._showRoutePopup(nodeId);
+      const parentLink = e.target.closest(".ms-parent-link");
+      if (parentLink) {
+        this._showRoutePopup(parseInt(parentLink.dataset.nodeId));
+        return;
+      }
+      const nameLink = e.target.closest(".ms-name-link");
+      if (nameLink) {
+        this._showActionPopup(parseInt(nameLink.dataset.nodeId));
+        return;
+      }
     });
 
-    // Close modal
+    // Close modals
     const modal = this.querySelector("#ms-modal");
     this.querySelector("#ms-modal-close").addEventListener("click", () => modal.classList.remove("open"));
     modal.addEventListener("click", (e) => { if (e.target === modal) modal.classList.remove("open"); });
+
+    const actionModal = this.querySelector("#ms-action-modal");
+    this.querySelector("#ms-action-modal-close").addEventListener("click", () => actionModal.classList.remove("open"));
+    actionModal.addEventListener("click", (e) => { if (e.target === actionModal) actionModal.classList.remove("open"); });
 
     this._updateTable();
   }
@@ -233,6 +278,87 @@ class MatterSaverCard extends HTMLElement {
 
     routeEl.innerHTML = html;
     modal.classList.add("open");
+  }
+
+  _showActionPopup(nodeId) {
+    const device = this._devices.find(d => d.node_id === nodeId);
+    if (!device) return;
+
+    const titleEl = this.querySelector("#ms-action-title");
+    const detailsEl = this.querySelector("#ms-action-details");
+    const buttonsEl = this.querySelector("#ms-action-buttons");
+    const statusEl = this.querySelector("#ms-action-status");
+    const modal = this.querySelector("#ms-action-modal");
+
+    titleEl.textContent = device.name || `Node ${nodeId}`;
+    statusEl.className = "ms-action-status";
+    statusEl.textContent = "";
+
+    // Device details table
+    const rows = [
+      ["Node ID", device.node_id],
+      ["Product", device.product],
+      ["Area", device.area || "-"],
+      ["Status", device.status],
+      ["Thread", this._threadRoleLabel(device.thread_role)],
+      ["Parent", device.parent || "-"],
+      ["Power", device.power],
+      ["Battery", device.battery != null ? `${Math.round(device.battery)}%` : "-"],
+      ["Firmware", device.firmware || "-"],
+      ["Errors", device.errors ? device.errors.toLocaleString() : "0"],
+    ];
+    if (device.error_comment) rows.push(["Diagnose", device.error_comment]);
+
+    detailsEl.innerHTML = `<table>${rows.map(([k, v]) =>
+      `<tr><td>${k}</td><td>${this._escHtml(String(v))}</td></tr>`
+    ).join("")}</table>`;
+
+    // Action buttons
+    buttonsEl.innerHTML = `
+      <button class="ms-action-btn ping" data-action="ping" data-node="${nodeId}">\uD83C\uDFD3 Ping</button>
+      <button class="ms-action-btn interview" data-action="interview" data-node="${nodeId}">\uD83D\uDD04 Re-Interview</button>
+      <button class="ms-action-btn reset" data-action="reset" data-node="${nodeId}">\uD83D\uDDD1 Reset Counters</button>
+    `;
+
+    // Attach button handlers
+    buttonsEl.querySelectorAll(".ms-action-btn").forEach(btn => {
+      btn.addEventListener("click", () => this._executeAction(btn.dataset.action, parseInt(btn.dataset.node)));
+    });
+
+    modal.classList.add("open");
+  }
+
+  async _executeAction(action, nodeId) {
+    const statusEl = this.querySelector("#ms-action-status");
+    const buttons = this.querySelectorAll(".ms-action-btn");
+
+    // Disable buttons during execution
+    buttons.forEach(b => b.disabled = true);
+    statusEl.className = "ms-action-status show loading";
+
+    const serviceMap = {
+      "ping": "ping_node",
+      "interview": "interview_node",
+      "reset": "reset_counters",
+    };
+    const labels = {
+      "ping": "Ping",
+      "interview": "Re-Interview",
+      "reset": "Reset Counters",
+    };
+
+    statusEl.textContent = `${labels[action]} wird ausgeführt...`;
+
+    try {
+      await this._hass.callService("matter_saver", serviceMap[action], { node_id: nodeId });
+      statusEl.className = "ms-action-status show success";
+      statusEl.textContent = `${labels[action]} erfolgreich für Node ${nodeId}`;
+    } catch (err) {
+      statusEl.className = "ms-action-status show error";
+      statusEl.textContent = `Fehler: ${err.message || err}`;
+    }
+
+    buttons.forEach(b => b.disabled = false);
   }
 
   _updateTable() {
@@ -363,11 +489,13 @@ class MatterSaverCard extends HTMLElement {
     const rowClass = d.status === "offline" ? "ms-offline-row" : "";
     const parentHtml = d.parent
       ? `<span class="ms-parent-link" data-node-id="${d.node_id}">${this._escHtml(d.parent)}</span>`
-      : "-";
+      : (d.thread_role === "router" || d.thread_role === "leader" || d.thread_role === "reed")
+        ? `<span class="ms-parent-link" data-node-id="${d.node_id}">Router</span>`
+        : "-";
 
     return `<tr class="${rowClass}">
       <td>${d.node_id}</td>
-      <td>${this._escHtml(d.name)}</td>
+      <td><span class="ms-name-link" data-node-id="${d.node_id}">${this._escHtml(d.name)}</span></td>
       <td>${this._escHtml(d.area)}</td>
       <td>${this._escHtml(d.product)}</td>
       <td><span class="ms-status">${statusIcon} ${d.status}</span></td>

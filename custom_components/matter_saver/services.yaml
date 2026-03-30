@@ -1,0 +1,38 @@
+ping_node:
+  name: Ping Node
+  description: Ping a Matter node to check if it is reachable.
+  fields:
+    node_id:
+      name: Node ID
+      description: The Matter node ID to ping.
+      required: true
+      selector:
+        number:
+          min: 1
+          mode: box
+
+interview_node:
+  name: Re-Interview Node
+  description: Re-interview a Matter node to refresh its attributes.
+  fields:
+    node_id:
+      name: Node ID
+      description: The Matter node ID to re-interview.
+      required: true
+      selector:
+        number:
+          min: 1
+          mode: box
+
+reset_counters:
+  name: Reset Error Counters
+  description: Reset Thread diagnostic counters for a node.
+  fields:
+    node_id:
+      name: Node ID
+      description: The Matter node ID to reset counters for.
+      required: true
+      selector:
+        number:
+          min: 1
+          mode: box

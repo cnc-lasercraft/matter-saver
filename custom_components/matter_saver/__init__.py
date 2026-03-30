@@ -7,9 +7,10 @@ import logging
 from typing import Any
 
 import aiohttp
+import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -263,10 +264,9 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Store RLOC base for routers
             node_info["_rloc_base"] = None
             if thread_role_val in (5, 6):
-                # Method 1: from route table - own entry has Allocated=True,
-                # LinkEstablished=False, ExtAddress!=0
                 route_table = self._get_matter_attr(attributes, 53, 8, [])
                 if isinstance(route_table, list):
+                    # Method 1: own entry has ExtAddr!=0, Allocated, !LinkEstablished
                     for entry in route_table:
                         if (isinstance(entry, dict)
                                 and entry.get("0", 0) != 0
@@ -276,7 +276,27 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             if rloc:
                                 node_info["_rloc_base"] = (rloc >> 10) * 1024
                             break
-                # Method 2 fallback: infer from children RLOC
+                    # Method 2: find the Allocated+!LinkEstablished entry
+                    # that is NOT a known linked neighbor
+                    if node_info["_rloc_base"] is None:
+                        linked_rids = set()
+                        candidates = []
+                        for entry in route_table:
+                            if not isinstance(entry, dict):
+                                continue
+                            rid = entry.get("2", -1)
+                            if entry.get("8", False) and entry.get("9", False):
+                                linked_rids.add(rid)
+                            elif entry.get("8", False) and not entry.get("9", False):
+                                candidates.append(entry)
+                        for c in candidates:
+                            rid = c.get("2", -1)
+                            if rid not in linked_rids:
+                                rloc = c.get("1", 0)
+                                if rloc:
+                                    node_info["_rloc_base"] = (rloc >> 10) * 1024
+                                break
+                # Method 3 fallback: infer from children RLOC
                 if node_info["_rloc_base"] is None and isinstance(neighbor_table, list):
                     for nb in neighbor_table:
                         if isinstance(nb, dict) and nb.get("13", False):
@@ -397,18 +417,48 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             break
 
             elif n["thread_role"] in ("router", "reed"):
-                # For routers, trace to leader
+                # Trace router path toward leader (max 5 hops)
                 if rloc_base and rloc_base != leader_rloc_base:
-                    if leader_rloc_base in router_neighbors:
-                        hop = router_neighbors[leader_rloc_base]
-                        lr = rloc_to_node[leader_rloc_base]
-                        path.append({
-                            "node_id": lr["node_id"],
-                            "name": lr["device_name"],
-                            "role": lr["thread_role"],
-                            "rssi": hop.get("rssi"),
-                            "lqi": hop.get("lqi"),
-                        })
+                    current_rloc = rloc_base
+                    current_neighbors = router_neighbors
+                    visited = {rloc_base}
+                    for _ in range(5):
+                        if current_rloc == leader_rloc_base:
+                            break
+                        # Direct link to leader?
+                        if leader_rloc_base in current_neighbors:
+                            hop = current_neighbors[leader_rloc_base]
+                            lr = rloc_to_node[leader_rloc_base]
+                            path.append({
+                                "node_id": lr["node_id"],
+                                "name": lr["device_name"],
+                                "role": lr["thread_role"],
+                                "rssi": hop.get("rssi"),
+                                "lqi": hop.get("lqi"),
+                            })
+                            break
+                        # Pick best LQI neighbor not yet visited
+                        best_rloc = None
+                        best_lqi = -1
+                        for nb_rloc, nb_info in current_neighbors.items():
+                            if nb_rloc not in visited and (nb_info.get("lqi") or 0) > best_lqi:
+                                best_lqi = nb_info.get("lqi") or 0
+                                best_rloc = nb_rloc
+                        if best_rloc and best_rloc in rloc_to_node:
+                            visited.add(best_rloc)
+                            nr = rloc_to_node[best_rloc]
+                            hop_info = current_neighbors[best_rloc]
+                            path.append({
+                                "node_id": nr["node_id"],
+                                "name": nr["device_name"],
+                                "role": nr["thread_role"],
+                                "rssi": hop_info.get("rssi"),
+                                "lqi": hop_info.get("lqi"),
+                            })
+                            current_rloc = best_rloc
+                            current_neighbors = nr.get("_router_neighbors", {})
+                        else:
+                            break
 
             # Final hop: HA
             path.append({"node_id": None, "name": "Home Assistant", "role": "ha", "rssi": None, "lqi": None})
@@ -423,6 +473,28 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "online": online_count,
             "offline": offline_count,
         }
+
+    async def send_matter_command(
+        self, command: str, args: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Send a command to the Matter Server and return the response."""
+        session = aiohttp.ClientSession()
+        try:
+            async with session.ws_connect(self.url, timeout=10) as ws:
+                await asyncio.wait_for(ws.receive(), timeout=5)  # server info
+                request: dict[str, Any] = {
+                    "message_id": "cmd",
+                    "command": command,
+                }
+                if args:
+                    request["args"] = args
+                await ws.send_json(request)
+                msg = await asyncio.wait_for(ws.receive(), timeout=15)
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    return json.loads(msg.data)
+                return {"error": f"Unexpected message type: {msg.type}"}
+        finally:
+            await session.close()
 
     @staticmethod
     def _get_matter_attr(
@@ -444,6 +516,11 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return default
 
 
+SERVICE_SCHEMA_NODE = vol.Schema({
+    vol.Required("node_id"): int,
+})
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) -> bool:
     """Set up Matter Saver from a config entry."""
     url = entry.data.get(CONF_MATTER_URL, DEFAULT_MATTER_URL)
@@ -453,10 +530,72 @@ async def async_setup_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) 
 
     entry.runtime_data = coordinator
 
+    async def handle_ping_node(call: ServiceCall) -> None:
+        """Ping a Matter node."""
+        node_id = call.data["node_id"]
+        _LOGGER.info("Pinging Matter node %s", node_id)
+        result = await coordinator.send_matter_command(
+            "ping_node", {"node_id": node_id}
+        )
+        hass.bus.async_fire(f"{DOMAIN}_action_result", {
+            "action": "ping",
+            "node_id": node_id,
+            "result": result,
+        })
+
+    async def handle_interview_node(call: ServiceCall) -> None:
+        """Re-interview a Matter node."""
+        node_id = call.data["node_id"]
+        _LOGGER.info("Re-interviewing Matter node %s", node_id)
+        result = await coordinator.send_matter_command(
+            "interview_node", {"node_id": node_id}
+        )
+        hass.bus.async_fire(f"{DOMAIN}_action_result", {
+            "action": "interview",
+            "node_id": node_id,
+            "result": result,
+        })
+        # Refresh data after interview
+        await coordinator.async_request_refresh()
+
+    async def handle_reset_counters(call: ServiceCall) -> None:
+        """Reset Thread diagnostic counters for a node via Matter cluster command."""
+        node_id = call.data["node_id"]
+        _LOGGER.info("Resetting Thread counters for node %s", node_id)
+        # Send cluster command: endpoint 0, cluster 53, command 0 (ResetCounts)
+        result = await coordinator.send_matter_command(
+            "send_command", {
+                "node_id": node_id,
+                "endpoint_id": 0,
+                "cluster_id": 53,
+                "command_name": "ResetCounts",
+                "payload": {},
+            }
+        )
+        hass.bus.async_fire(f"{DOMAIN}_action_result", {
+            "action": "reset_counters",
+            "node_id": node_id,
+            "result": result,
+        })
+        await coordinator.async_request_refresh()
+
+    hass.services.async_register(
+        DOMAIN, "ping_node", handle_ping_node, schema=SERVICE_SCHEMA_NODE,
+    )
+    hass.services.async_register(
+        DOMAIN, "interview_node", handle_interview_node, schema=SERVICE_SCHEMA_NODE,
+    )
+    hass.services.async_register(
+        DOMAIN, "reset_counters", handle_reset_counters, schema=SERVICE_SCHEMA_NODE,
+    )
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) -> bool:
     """Unload a config entry."""
+    hass.services.async_remove(DOMAIN, "ping_node")
+    hass.services.async_remove(DOMAIN, "interview_node")
+    hass.services.async_remove(DOMAIN, "reset_counters")
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
