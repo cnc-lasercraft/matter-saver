@@ -705,10 +705,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) 
 
     coordinator = MatterSaverCoordinator(hass, url)
     await coordinator.async_load_log()
-    await coordinator.async_config_entry_first_refresh()
 
+    # Don't block HA startup - schedule first refresh in background
     entry.runtime_data = coordinator
-    await coordinator.start_auto_recovery()
+
+    async def _delayed_start() -> None:
+        """Start coordinator and recovery after HA is fully up."""
+        await asyncio.sleep(30)  # Wait for Matter Server to be ready
+        try:
+            await coordinator.async_refresh()
+        except Exception:
+            _LOGGER.warning("Matter Saver: initial refresh failed, will retry in 60s")
+        await coordinator.start_auto_recovery()
+
+    hass.async_create_task(_delayed_start())
 
     def _node_name(nid: int) -> str:
         """Get device name for a node_id from coordinator data."""
