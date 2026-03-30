@@ -1,0 +1,16 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Matter Monitor Setup",
+        "description": "Connect to your Matter Server to monitor device status.",
+        "data": {
+          "matter_url": "Matter Server WebSocket URL"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to Matter Server. Check the URL and ensure the Matter Server addon is running."
+    }
+  }
+}
