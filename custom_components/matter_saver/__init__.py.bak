@@ -49,7 +49,6 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.max_log_entries = 200
         self._store = Store(hass, 1, f"{DOMAIN}_data")
         self._store_loaded = False
-        self._first_refresh_done = False
         # Offline history: node_id -> list of {"start": iso, "end": iso|None, "duration_min": int}
         self.offline_history: dict[int, list[dict[str, Any]]] = {}
         # Auto-recovery
@@ -153,8 +152,7 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Matter Server."""
         try:
-            data = await self._fetch_matter_nodes(light=not self._first_refresh_done)
-            self._first_refresh_done = True
+            data = await self._fetch_matter_nodes()
         except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as err:
             raise UpdateFailed(f"Error communicating with Matter Server: {err}") from err
 
@@ -218,7 +216,7 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data["activity_log"] = self.activity_log
         return data
 
-    async def _fetch_matter_nodes(self, light: bool = False) -> dict[str, Any]:
+    async def _fetch_matter_nodes(self) -> dict[str, Any]:
         """Connect to Matter Server WebSocket and get all nodes."""
         session = aiohttp.ClientSession()
         try:
@@ -237,63 +235,11 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 msg = await asyncio.wait_for(ws.receive(), timeout=15)
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
-                    if light:
-                        # Quick parse for startup - no registry lookups
-                        return self._parse_nodes_light(data)
                     return self._parse_nodes(data)
 
                 raise UpdateFailed(f"Unexpected WebSocket message type: {msg.type}")
         finally:
             await session.close()
-
-    def _parse_nodes_light(self, data: Any) -> dict[str, Any]:
-        """Quick parse for startup - basic info only, no registry lookups."""
-        raw_nodes = []
-        if isinstance(data, dict):
-            raw_nodes = data.get("result", data.get("nodes", []))
-        elif isinstance(data, list):
-            raw_nodes = data
-        if not isinstance(raw_nodes, list):
-            raw_nodes = []
-
-        nodes = []
-        online_count = 0
-        offline_count = 0
-        for node in raw_nodes:
-            if not isinstance(node, dict):
-                continue
-            node_id = node.get("node_id")
-            available = node.get("available", False)
-            attributes = node.get("attributes", {})
-            if available:
-                online_count += 1
-            else:
-                offline_count += 1
-            nodes.append({
-                "node_id": node_id,
-                "device_name": self._get_matter_attr(attributes, 40, 3, ""),
-                "area": "",
-                "available": available,
-                "product_name": self._get_matter_attr(attributes, 40, 3, ""),
-                "vendor_name": self._get_matter_attr(attributes, 40, 1, ""),
-                "software_version_string": self._get_matter_attr(attributes, 40, 10, ""),
-                "update_available": False,
-                "thread_role": "unknown",
-                "neighbors": 0, "children": 0,
-                "errors": 0, "error_comment": "",
-                "battery_percent": None, "power_source": "unknown",
-                "parent_node_id": None, "parent_name": "",
-                "route_path": [], "last_seen": self._last_seen.get(node_id, ""),
-                "offline_7d_count": 0, "offline_7d_minutes": 0,
-                "offline_30d_count": 0, "offline_30d_minutes": 0,
-            })
-
-        nodes.sort(key=lambda n: (n["available"], n["node_id"] or 0))
-        return {
-            "nodes": nodes, "total": len(nodes),
-            "online": online_count, "offline": offline_count,
-            "activity_log": self.activity_log,
-        }
 
     def _build_node_device_map(self) -> dict[int, dict[str, str]]:
         """Build a mapping of Matter node_id to HA device info.
@@ -759,9 +705,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) 
 
     coordinator = MatterSaverCoordinator(hass, url)
     await coordinator.async_load_log()
-    await coordinator.async_config_entry_first_refresh()
 
+    # Don't block HA startup - schedule first refresh in background
     entry.runtime_data = coordinator
+
+    async def _delayed_start() -> None:
+        """Start coordinator and recovery after HA is fully up."""
+        await asyncio.sleep(30)  # Wait for Matter Server to be ready
+        try:
+            await coordinator.async_refresh()
+        except Exception:
+            _LOGGER.warning("Matter Saver: initial refresh failed, will retry in 60s")
+        await coordinator.start_auto_recovery()
+
+    hass.async_create_task(_delayed_start())
 
     def _node_name(nid: int) -> str:
         """Get device name for a node_id from coordinator data."""
