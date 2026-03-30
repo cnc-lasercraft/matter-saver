@@ -53,7 +53,8 @@ class MatterSaverMeshCard extends HTMLElement {
           .mm-legend-item { display: flex; align-items: center; gap: 4px; }
           .mm-legend-dot { width: 12px; height: 12px; border-radius: 50%; }
           .mm-svg-wrap {
-            width: 100%; height: 600px; position: relative; overflow: hidden;
+            width: 100%; height: calc(100vh - 180px); min-height: 400px;
+            position: relative; overflow: hidden;
             cursor: grab; user-select: none;
           }
           .mm-svg-wrap.grabbing { cursor: grabbing; }
