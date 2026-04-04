@@ -737,8 +737,8 @@ window.customCards.push({
         badge.slot = "end";
         badge.className = "badge";
         badge.style.cssText =
-          "min-width:18px;height:18px;border-radius:9px;" +
-          "background:#f5a623;color:#fff;font-size:11px;font-weight:700;" +
+          "min-width:20px;height:20px;border-radius:10px;" +
+          "background:#f5a623;color:#fff;font-size:12px;font-weight:700;" +
           "display:inline-flex;align-items:center;justify-content:center;" +
           "padding:0 5px;box-sizing:border-box;line-height:1;";
         item.appendChild(badge);
