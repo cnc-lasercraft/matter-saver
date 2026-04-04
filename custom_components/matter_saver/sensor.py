@@ -55,6 +55,7 @@ class MatterDeviceCountSensor(MatterSaverBaseSensor):
     _attr_icon = "mdi:devices"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "devices"
+    _unrecorded_attributes = frozenset({"devices"})
 
     def __init__(
         self, coordinator: MatterSaverCoordinator, entry: ConfigEntry
@@ -64,10 +65,10 @@ class MatterDeviceCountSensor(MatterSaverBaseSensor):
         self._attr_unique_id = f"{entry.entry_id}_device_count"
 
     @property
-    def native_value(self) -> int | None:
+    def native_value(self) -> int:
         """Return total device count."""
         if self.coordinator.data is None:
-            return None
+            return 0
         return self.coordinator.data.get("total", 0)
 
     @property
@@ -132,10 +133,10 @@ class MatterOnlineSensor(MatterSaverBaseSensor):
         self._attr_unique_id = f"{entry.entry_id}_online"
 
     @property
-    def native_value(self) -> int | None:
+    def native_value(self) -> int:
         """Return online device count."""
         if self.coordinator.data is None:
-            return None
+            return 0
         return self.coordinator.data.get("online", 0)
 
 
@@ -155,10 +156,10 @@ class MatterOfflineSensor(MatterSaverBaseSensor):
         self._attr_unique_id = f"{entry.entry_id}_offline"
 
     @property
-    def native_value(self) -> int | None:
+    def native_value(self) -> int:
         """Return offline device count."""
         if self.coordinator.data is None:
-            return None
+            return 0
         return self.coordinator.data.get("offline", 0)
 
 
@@ -167,6 +168,7 @@ class MatterActivityLogSensor(MatterSaverBaseSensor):
 
     _attr_name = "Activity Log"
     _attr_icon = "mdi:text-box-outline"
+    _unrecorded_attributes = frozenset({"entries"})
 
     def __init__(
         self, coordinator: MatterSaverCoordinator, entry: ConfigEntry
