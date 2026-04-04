@@ -465,9 +465,11 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._last_seen[node_id] = datetime.now(timezone.utc).isoformat()
                 online_count += 1
             else:
-                if node_id not in self._last_seen:
-                    last_interview = node.get("last_interview", "")
-                    if last_interview:
+                # Always update from last_interview if it's more recent
+                last_interview = node.get("last_interview", "")
+                if last_interview:
+                    existing = self._last_seen.get(node_id, "")
+                    if not existing or last_interview > existing:
                         self._last_seen[node_id] = last_interview
                 offline_count += 1
 
