@@ -697,3 +697,81 @@ window.customCards.push({
   name: "Matter Saver Card",
   description: "Sortable Matter device table with route visualization",
 });
+
+/* ── Sidebar Badge: show offline device count ── */
+(function initSidebarBadge() {
+  const LABEL = "Matter Saver";
+  const ENTITY = "sensor.matter_saver_offline";
+  const BADGE_ID = "ms-sidebar-badge";
+
+  function getHass() {
+    const el = document.querySelector("home-assistant");
+    return el && (el.hass || el.__hass);
+  }
+
+  function findSidebarItem() {
+    try {
+      const sidebar = document.querySelector("home-assistant")
+        ?.shadowRoot?.querySelector("home-assistant-main")
+        ?.shadowRoot?.querySelector("ha-drawer")
+        ?.querySelector("ha-sidebar")
+        ?.shadowRoot;
+      if (!sidebar) return null;
+      const items = sidebar.querySelectorAll("ha-md-list-item");
+      for (const item of items) {
+        const headline = item.querySelector('.item-text[slot="headline"]');
+        if (headline && headline.textContent.trim() === LABEL) return item;
+      }
+      return null;
+    } catch { return null; }
+  }
+
+  function updateBadge(count) {
+    const item = findSidebarItem();
+    if (!item) return;
+    let badge = item.querySelector(`#${BADGE_ID}`);
+    if (count > 0) {
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.id = BADGE_ID;
+        badge.slot = "end";
+        badge.className = "badge";
+        badge.style.cssText =
+          "min-width:18px;height:18px;border-radius:9px;" +
+          "background:#f5a623;color:#fff;font-size:11px;font-weight:700;" +
+          "display:inline-flex;align-items:center;justify-content:center;" +
+          "padding:0 5px;box-sizing:border-box;line-height:1;";
+        item.appendChild(badge);
+      }
+      badge.textContent = count;
+    } else if (badge) {
+      badge.remove();
+    }
+  }
+
+  function poll() {
+    const hass = getHass();
+    if (!hass) { setTimeout(poll, 2000); return; }
+    const state = hass.states[ENTITY];
+    updateBadge(state ? parseInt(state.state, 10) || 0 : 0);
+
+    // Subscribe to state changes
+    hass.connection.subscribeEvents((ev) => {
+      if (ev.data.entity_id === ENTITY) {
+        const val = parseInt(ev.data.new_state?.state, 10) || 0;
+        updateBadge(val);
+      }
+    }, "state_changed");
+
+    // Re-check periodically (sidebar may re-render)
+    setInterval(() => {
+      const h = getHass();
+      if (!h) return;
+      const s = h.states[ENTITY];
+      updateBadge(s ? parseInt(s.state, 10) || 0 : 0);
+    }, 30000);
+  }
+
+  if (document.readyState === "complete") poll();
+  else window.addEventListener("load", poll);
+})();
