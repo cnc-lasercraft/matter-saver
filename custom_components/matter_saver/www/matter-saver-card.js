@@ -522,7 +522,7 @@ class MatterSaverCard extends HTMLElement {
     });
     this._setActionTab(this._activeDeviceTab || "overview");
 
-    contentEl.querySelectorAll(".ms-action-btn").forEach((btn) => {
+    contentEl.querySelectorAll(".ms-action-btn[data-action][data-node]").forEach((btn) => {
       btn.addEventListener("click", () => this._executeAction(btn.dataset.action, parseInt(btn.dataset.node)));
     });
 
@@ -669,7 +669,7 @@ class MatterSaverCard extends HTMLElement {
 
   async _executeAction(action, nodeId) {
     const statusEl = this.querySelector("#ms-action-status");
-    const buttons = this.querySelectorAll(".ms-action-btn");
+    const buttons = this.querySelectorAll(".ms-action-btn[data-action][data-node]");
 
     // Disable buttons during execution
     buttons.forEach(b => b.disabled = true);
@@ -691,6 +691,12 @@ class MatterSaverCard extends HTMLElement {
       "interview": this._t("interviewRunning"),
       "reset": this._t("resetRunning"),
     };
+    if (!serviceMap[action]) {
+      statusEl.className = "ms-action-status show error";
+      statusEl.textContent = this._t("errorPrefix", { error: `Unsupported action: ${action}` });
+      buttons.forEach(b => b.disabled = false);
+      return;
+    }
     statusEl.textContent = hints[action] || `${labels[action]}...`;
 
     try {
