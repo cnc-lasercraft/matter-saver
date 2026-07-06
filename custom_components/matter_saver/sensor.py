@@ -1,13 +1,20 @@
 """Sensor platform for Matter Saver."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from . import MatterSaverCoordinator
 from .const import DOMAIN, get_integration_version, get_repository_url
@@ -134,6 +141,43 @@ async def async_setup_entry(
         MatterOfflineSensor(coordinator, entry),
         MatterActivityLogSensor(coordinator, entry),
     ])
+
+    # Per-node diagnostic sensors are created dynamically as nodes appear and
+    # are mapped to their core Matter device. Track which nodes already have
+    # entities so refreshes only add the newly seen ones.
+    known_nodes: set[int] = set()
+
+    @callback
+    def _async_add_node_sensors() -> None:
+        """Add per-node diagnostic sensors for newly seen Matter nodes."""
+        if coordinator.data is None:
+            return
+        new_entities: list[SensorEntity] = []
+        for node in coordinator.data.get("nodes", []):
+            node_id = node.get("node_id")
+            if node_id is None or node_id in known_nodes:
+                continue
+            matter_identifier = node.get("matter_identifier")
+            if not matter_identifier:
+                # Not yet mapped to a core Matter device (e.g. startup light
+                # parse). Skip for now; a later refresh will pick it up.
+                continue
+            known_nodes.add(node_id)
+            new_entities.append(
+                MatterNodeLastInterviewSensor(
+                    coordinator, entry, node_id, matter_identifier
+                )
+            )
+            new_entities.append(
+                MatterNodeInterviewVersionSensor(
+                    coordinator, entry, node_id, matter_identifier
+                )
+            )
+        if new_entities:
+            async_add_entities(new_entities)
+
+    _async_add_node_sensors()
+    entry.async_on_unload(coordinator.async_add_listener(_async_add_node_sensors))
 
 
 class MatterSaverBaseSensor(CoordinatorEntity[MatterSaverCoordinator], SensorEntity):
@@ -283,3 +327,110 @@ class MatterActivityLogSensor(MatterSaverBaseSensor):
         return {
             "entries": self.coordinator.activity_log,
         }
+
+
+class MatterNodeDiagnosticSensor(
+    CoordinatorEntity[MatterSaverCoordinator], SensorEntity
+):
+    """Base class for per-node diagnostic sensors.
+
+    Unlike the aggregate hub sensors, each of these binds to the node's own
+    core Matter device (via the Matter integration's device identifier) so the
+    entity is grouped under the real device and inherits its friendly name.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: MatterSaverCoordinator,
+        entry: ConfigEntry,
+        node_id: int,
+        matter_identifier: tuple[str, str],
+    ) -> None:
+        """Initialize the per-node sensor bound to its core Matter device."""
+        super().__init__(coordinator)
+        self._entry = entry
+        self._node_id = node_id
+        # Link to the existing Matter device; do not set name/manufacturer so
+        # we attach to it rather than trying to redefine it.
+        self._attr_device_info = {"identifiers": {tuple(matter_identifier)}}
+
+    def _node(self) -> dict[str, Any] | None:
+        """Return this node's current coordinator dict, if still present."""
+        if self.coordinator.data is None:
+            return None
+        for node in self.coordinator.data.get("nodes", []):
+            if node.get("node_id") == self._node_id:
+                return node
+        return None
+
+
+class MatterNodeLastInterviewSensor(MatterNodeDiagnosticSensor):
+    """Timestamp of the node's last completed Matter interview."""
+
+    _attr_name = "Last Interview"
+    _attr_icon = "mdi:calendar-clock"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(
+        self,
+        coordinator: MatterSaverCoordinator,
+        entry: ConfigEntry,
+        node_id: int,
+        matter_identifier: tuple[str, str],
+    ) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry, node_id, matter_identifier)
+        self._attr_unique_id = f"{entry.entry_id}_{node_id}_last_interview"
+
+    @property
+    def native_value(self) -> datetime | None:
+        """Return the last-interview time as a timezone-aware datetime."""
+        node = self._node()
+        if node is None:
+            return None
+        raw = node.get("last_interview")
+        if not raw:
+            return None
+        parsed = raw if isinstance(raw, datetime) else dt_util.parse_datetime(str(raw))
+        if parsed is None:
+            return None
+        if parsed.tzinfo is None:
+            # Matter Server reports naive UTC timestamps; make them tz-aware
+            # so Home Assistant can do time-math in templates/automations.
+            parsed = parsed.replace(tzinfo=dt_util.UTC)
+        return parsed
+
+
+class MatterNodeInterviewVersionSensor(MatterNodeDiagnosticSensor):
+    """Interview schema version the node was last interviewed under."""
+
+    _attr_name = "Interview Version"
+    _attr_icon = "mdi:counter"
+
+    def __init__(
+        self,
+        coordinator: MatterSaverCoordinator,
+        entry: ConfigEntry,
+        node_id: int,
+        matter_identifier: tuple[str, str],
+    ) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry, node_id, matter_identifier)
+        self._attr_unique_id = f"{entry.entry_id}_{node_id}_interview_version"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the node's interview schema version."""
+        node = self._node()
+        if node is None:
+            return None
+        version = node.get("interview_version")
+        if version is None:
+            return None
+        try:
+            return int(version)
+        except (TypeError, ValueError):
+            return None

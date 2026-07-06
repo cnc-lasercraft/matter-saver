@@ -861,6 +861,7 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "software_version_string": self._get_matter_attr(attributes, 40, 10, ""),
                 "date_commissioned": node.get("date_commissioned", ""),
                 "last_interview": node.get("last_interview", ""),
+                "interview_version": node.get("interview_version"),
                 "device_type_ids": self._extract_device_type_ids(attributes),
                 "update_available": False,
                 "thread_role": "unknown",
@@ -936,6 +937,9 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             "area": area_info.get("name", ""),
                             "floor": area_info.get("floor", ""),
                             "update_available": update_available.get(device.id, False),
+                            # Reuse the core Matter device identifier so our
+                            # per-node diagnostic entities bind to that device.
+                            "matter_identifier": (domain, identifier),
                         }
                     except (ValueError, IndexError):
                         continue
@@ -991,6 +995,8 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "software_version_string": self._get_matter_attr(attributes, 40, 10, ""),
                 "date_commissioned": node.get("date_commissioned", ""),
                 "last_interview": node.get("last_interview", ""),
+                "interview_version": node.get("interview_version"),
+                "matter_identifier": device_info.get("matter_identifier"),
                 "device_type_ids": self._extract_device_type_ids(attributes),
                 "thread_ext_address": self._format_thread_ext_address(
                     self._get_matter_attr(attributes, 53, 63, None)

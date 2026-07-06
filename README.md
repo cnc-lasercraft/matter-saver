@@ -108,6 +108,7 @@ The visual editor exposes card-specific options such as title overrides, default
 | Matter cluster 40 | Basic device information |
 | Matter cluster 47 | Battery level |
 | Matter cluster 53 | Thread role, neighbors, routing, and error counters |
+| Matter node metadata (`last_interview`, `interview_version`) | Per-node **Last Interview** (timestamp) and **Interview Version** diagnostic sensors, bound to each core Matter device |
 
 ## Roadmap
 
