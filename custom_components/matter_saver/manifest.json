@@ -1,11 +1,19 @@
 {
   "domain": "matter_saver",
   "name": "Matter Saver",
-  "codeowners": ["@cnc-lasercraft"],
+  "codeowners": [
+    "@cnc-lasercraft"
+  ],
   "config_flow": true,
+  "dependencies": [
+    "frontend",
+    "http"
+  ],
   "documentation": "https://github.com/cnc-lasercraft/matter-saver",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/cnc-lasercraft/matter-saver/issues",
-  "requirements": ["aiohttp>=3.8.0"],
-  "version": "0.1.0"
+  "requirements": [
+    "aiohttp>=3.8.0"
+  ],
+  "version": "0.2.0"
 }

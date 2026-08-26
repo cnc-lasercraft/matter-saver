@@ -4,14 +4,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import aiohttp
 import voluptuous as vol
 
+from homeassistant.components.frontend import add_extra_js_url
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
+from homeassistant.helpers import area_registry as ar, config_validation as cv, device_registry as dr, entity_registry as er
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -27,6 +31,15 @@ from datetime import datetime, timedelta, timezone
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor"]
+
+CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
+
+LOVELACE_CARDS = (
+    "matter-saver-card.js",
+    "matter-saver-log-card.js",
+    "matter-saver-mesh-card.js",
+    "matter-saver-topology-card.js",
+)
 
 type MatterSaverConfigEntry = ConfigEntry[MatterSaverCoordinator]
 
@@ -753,6 +766,22 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 SERVICE_SCHEMA_NODE = vol.Schema({
     vol.Required("node_id"): int,
 })
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up the Matter Saver integration (register bundled Lovelace cards)."""
+    await hass.http.async_register_static_paths(
+        [
+            StaticPathConfig(
+                f"/{DOMAIN}",
+                str(Path(__file__).parent / "www"),
+                cache_headers=False,
+            )
+        ]
+    )
+    for card in LOVELACE_CARDS:
+        add_extra_js_url(hass, f"/{DOMAIN}/{card}")
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) -> bool:

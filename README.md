@@ -42,14 +42,16 @@ Custom Component for Home Assistant to monitor and manage Matter/Thread devices.
 
 ### Manual
 
-1. Copy `custom_components/matter_saver/` to your `/config/custom_components/` directory
-2. Copy `www/matter-saver-card.js`, `www/matter-saver-log-card.js`, and `www/matter-saver-topology-card.js` to your `/config/www/` directory
-3. Add the cards as dashboard resources (type: module):
-   - `/local/matter-saver-card.js`
-   - `/local/matter-saver-log-card.js`
-   - `/local/matter-saver-topology-card.js`
-4. Restart Home Assistant
-5. Add the integration via UI
+1. Copy `custom_components/matter_saver/` (including its `www/` folder) to your `/config/custom_components/` directory
+2. Restart Home Assistant
+3. Add the integration via UI
+
+The Lovelace cards are bundled inside the integration and registered automatically
+(served under `/matter_saver/<card>.js`). No manual copying to `/config/www/` and no
+dashboard resource entries are needed.
+
+> Upgrading from 0.1.x: remove the old `/local/matter-saver-*.js` dashboard resources
+> and delete the copied files from `/config/www/` to avoid loading the cards twice.
 
 ## Requirements
 
@@ -70,10 +72,11 @@ Custom Component for Home Assistant to monitor and manage Matter/Thread devices.
 
 ## Custom Cards
 
-Three custom Lovelace cards are included:
+Four custom Lovelace cards are bundled with the integration and loaded automatically:
 
 - **`matter-saver-card`** - Main device table with sorting, grouping, search, action popup, and route popup
 - **`matter-saver-log-card`** - Activity log with filtering and relative timestamps
+- **`matter-saver-mesh-card`** - Interactive Thread mesh network visualization
 - **`matter-saver-topology-card`** - Thread mesh topology tree
 
 ## Services
