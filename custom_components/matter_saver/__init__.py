@@ -333,7 +333,13 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     update_available[entity.device_id] = state.state == "on"
 
         for device in dev_reg.devices.values():
-            for domain, identifier in device.identifiers:
+            for identifier_tuple in device.identifiers:
+                # HA's convention is a 2-tuple, but nothing enforces it - some
+                # integrations register longer tuples. Unpack defensively so a
+                # foreign device cannot break the whole coordinator refresh.
+                if len(identifier_tuple) < 2:
+                    continue
+                domain, identifier = identifier_tuple[0], identifier_tuple[1]
                 if domain != "matter":
                     continue
                 # Extract node_id hex from identifier string
