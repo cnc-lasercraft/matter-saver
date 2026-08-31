@@ -176,10 +176,25 @@ class MatterSaverLogCard extends HTMLElement {
   getCardSize() { return 6; }
 }
 
-customElements.define("matter-saver-log-card", MatterSaverLogCard);
-window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "matter-saver-log-card",
-  name: "Matter Saver Log Card",
-  description: "Activity log for Matter Saver",
-});
+// Register only once the frontend is loaded. HA's app.js installs the scoped
+// custom element registry polyfill, which replaces customElements with its own
+// map. A module from extra_module_url can run before app.js; defining then puts
+// the element in the native registry only, where Lovelace's customElements.get()
+// cannot see it -> "configuration error" until the page is reloaded.
+function registerMatterSaverLogCard() {
+  if (customElements.get("matter-saver-log-card")) return;
+  try {
+    customElements.define("matter-saver-log-card", MatterSaverLogCard);
+  } catch (e) {
+    return;
+  }
+  window.customCards = window.customCards || [];
+  window.customCards.push({
+    type: "matter-saver-log-card",
+    name: "Matter Saver Log Card",
+    description: "Activity log for Matter Saver",
+  });
+}
+
+if (document.readyState === "complete") registerMatterSaverLogCard();
+else window.addEventListener("load", registerMatterSaverLogCard, { once: true });

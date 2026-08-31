@@ -690,13 +690,28 @@ class MatterSaverCard extends HTMLElement {
   getCardSize() { return 8; }
 }
 
-customElements.define("matter-saver-card", MatterSaverCard);
-window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "matter-saver-card",
-  name: "Matter Saver Card",
-  description: "Sortable Matter device table with route visualization",
-});
+// Register only once the frontend is loaded. HA's app.js installs the scoped
+// custom element registry polyfill, which replaces customElements with its own
+// map. A module from extra_module_url can run before app.js; defining then puts
+// the element in the native registry only, where Lovelace's customElements.get()
+// cannot see it -> "configuration error" until the page is reloaded.
+function registerMatterSaverCard() {
+  if (customElements.get("matter-saver-card")) return;
+  try {
+    customElements.define("matter-saver-card", MatterSaverCard);
+  } catch (e) {
+    return;
+  }
+  window.customCards = window.customCards || [];
+  window.customCards.push({
+    type: "matter-saver-card",
+    name: "Matter Saver Card",
+    description: "Sortable Matter device table with route visualization",
+  });
+}
+
+if (document.readyState === "complete") registerMatterSaverCard();
+else window.addEventListener("load", registerMatterSaverCard, { once: true });
 
 /* ── Sidebar Badge: show offline device count ── */
 (function initSidebarBadge() {
@@ -751,7 +766,10 @@ window.customCards.push({
 
   function poll() {
     const hass = getHass();
-    if (!hass) { setTimeout(poll, 2000); return; }
+    // hass exists well before its states/connection do: during frontend startup
+    // hass.states is still null, and reading it here threw a TypeError on every
+    // cold load (logged from macOS and Android alike).
+    if (!hass || !hass.states || !hass.connection) { setTimeout(poll, 2000); return; }
     const state = hass.states[ENTITY];
     updateBadge(state ? parseInt(state.state, 10) || 0 : 0);
 
@@ -766,7 +784,7 @@ window.customCards.push({
     // Re-check periodically (sidebar may re-render)
     setInterval(() => {
       const h = getHass();
-      if (!h) return;
+      if (!h || !h.states) return;
       const s = h.states[ENTITY];
       updateBadge(s ? parseInt(s.state, 10) || 0 : 0);
     }, 30000);

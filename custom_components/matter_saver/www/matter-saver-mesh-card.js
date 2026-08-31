@@ -371,10 +371,25 @@ class MatterSaverMeshCard extends HTMLElement {
   getCardSize() { return 8; }
 }
 
-customElements.define("matter-saver-mesh-card", MatterSaverMeshCard);
-window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "matter-saver-mesh-card",
-  name: "Matter Saver Mesh Card",
-  description: "Interactive Thread mesh network visualization",
-});
+// Register only once the frontend is loaded. HA's app.js installs the scoped
+// custom element registry polyfill, which replaces customElements with its own
+// map. A module from extra_module_url can run before app.js; defining then puts
+// the element in the native registry only, where Lovelace's customElements.get()
+// cannot see it -> "configuration error" until the page is reloaded.
+function registerMatterSaverMeshCard() {
+  if (customElements.get("matter-saver-mesh-card")) return;
+  try {
+    customElements.define("matter-saver-mesh-card", MatterSaverMeshCard);
+  } catch (e) {
+    return;
+  }
+  window.customCards = window.customCards || [];
+  window.customCards.push({
+    type: "matter-saver-mesh-card",
+    name: "Matter Saver Mesh Card",
+    description: "Interactive Thread mesh network visualization",
+  });
+}
+
+if (document.readyState === "complete") registerMatterSaverMeshCard();
+else window.addEventListener("load", registerMatterSaverMeshCard, { once: true });
