@@ -13,6 +13,7 @@ import voluptuous as vol
 from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import MAJOR_VERSION, MINOR_VERSION
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import area_registry as ar, config_validation as cv, device_registry as dr, entity_registry as er
 from homeassistant.helpers.typing import ConfigType
@@ -29,6 +30,9 @@ from .const import (
 from datetime import datetime, timedelta, timezone
 
 _LOGGER = logging.getLogger(__name__)
+
+# See the comment at its use site in the device loop below.
+_DEVICES_IS_COLLECTION = (MAJOR_VERSION, MINOR_VERSION) >= (2026, 9)
 
 PLATFORMS = ["sensor"]
 
@@ -332,7 +336,13 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if state:
                     update_available[entity.device_id] = state.state == "on"
 
-        for device in dev_reg.devices.values():
+        # HA 2026.9 turned DeviceRegistry.devices into a Collection of entries;
+        # using it as a mapping is deprecated and goes away in 2027.9. Older cores
+        # still expose a mapping, whose iteration yields device *ids* rather than
+        # entries — so pick the right access instead of raising the minimum core
+        # version for this one call site.
+        devices = dev_reg.devices if _DEVICES_IS_COLLECTION else dev_reg.devices.values()
+        for device in devices:
             for identifier_tuple in device.identifiers:
                 # HA's convention is a 2-tuple, but nothing enforces it - some
                 # integrations register longer tuples. Unpack defensively so a
