@@ -23,6 +23,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import (
     CONF_MATTER_URL,
     DEFAULT_MATTER_URL,
+    COUNTER_REFRESH_SECONDS,
     DOMAIN,
     SCAN_INTERVAL_SECONDS,
 )
@@ -35,6 +36,14 @@ _LOGGER = logging.getLogger(__name__)
 _DEVICES_IS_COLLECTION = (MAJOR_VERSION, MINOR_VERSION) >= (2026, 9)
 
 PLATFORMS = ["sensor"]
+
+# ThreadNetworkDiagnostics (cluster 53) counters shown as "errors"/"retries".
+# The Matter Server does not keep these current in its node cache (they are
+# not reported through the subscription), so they are read from the device.
+THREAD_COUNTER_ATTRS = (25, 28, 29, 30, 42, 43, 44, 45, 46)
+THREAD_COUNTER_PATHS = [f"0/53/{attr}" for attr in THREAD_COUNTER_ATTRS]
+# Roles that keep their radio on; sleepy end devices are never polled.
+THREAD_ALWAYS_ON_ROLES = ("end_device", "reed", "router", "leader")
 
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 
@@ -73,6 +82,9 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.auto_recovery_enabled = True
         self._recovery_task: asyncio.Task | None = None
         self._recovery_interval = 300  # 5 minutes
+        # Live Thread counters: node_id -> {"0/53/<attr>": value}
+        self._live_counters: dict[int, dict[str, Any]] = {}
+        self._counter_task: asyncio.Task | None = None
 
     async def async_load_log(self) -> None:
         """Load persistent data from storage."""
@@ -126,6 +138,96 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._recovery_task is not None:
             self._recovery_task.cancel()
             self._recovery_task = None
+
+    def start_counter_refresh(self, entry: ConfigEntry) -> None:
+        """Start the background task that reads Thread counters live."""
+        self.stop_counter_refresh()
+        self._counter_task = entry.async_create_background_task(
+            self.hass, self._counter_refresh_loop(), f"{DOMAIN}_counter_refresh"
+        )
+
+    def stop_counter_refresh(self) -> None:
+        """Stop the live counter background task."""
+        if self._counter_task is not None:
+            self._counter_task.cancel()
+            self._counter_task = None
+
+    async def _counter_refresh_loop(self) -> None:
+        """Periodically read the Thread counters of mains-powered nodes."""
+        # Let the first full refresh finish so roles and power source are known
+        await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+        while True:
+            try:
+                if await self.async_refresh_live_counters():
+                    await self.async_request_refresh()
+            except Exception:  # noqa: BLE001 - don't crash the loop
+                _LOGGER.debug("Live counter refresh failed", exc_info=True)
+            await asyncio.sleep(COUNTER_REFRESH_SECONDS)
+
+    def _counter_poll_targets(self) -> list[int]:
+        """Node ids whose counters are read live: online, mains-powered Thread."""
+        if not self.data:
+            return []
+        return [
+            n["node_id"] for n in self.data.get("nodes", [])
+            if n.get("available")
+            and n.get("power_source") == "wired"
+            and n.get("thread_role") in THREAD_ALWAYS_ON_ROLES
+        ]
+
+    async def async_refresh_live_counters(
+        self, node_ids: list[int] | None = None
+    ) -> bool:
+        """Read Thread counters from the devices; return True if any were read."""
+        targets = node_ids if node_ids is not None else self._counter_poll_targets()
+        if not targets:
+            return False
+        updated = False
+        session = aiohttp.ClientSession()
+        try:
+            async with session.ws_connect(self.url, timeout=10) as ws:
+                await asyncio.wait_for(ws.receive(), timeout=5)  # server info
+                for nid in targets:
+                    message_id = f"counters-{nid}"
+                    await ws.send_json({
+                        "message_id": message_id,
+                        "command": "read_attribute",
+                        "args": {
+                            "node_id": nid,
+                            "attribute_path": THREAD_COUNTER_PATHS,
+                        },
+                    })
+                    try:
+                        async with asyncio.timeout(15):
+                            while True:
+                                msg = await ws.receive()
+                                if msg.type != aiohttp.WSMsgType.TEXT:
+                                    return updated
+                                data = json.loads(msg.data)
+                                # A late answer for a timed-out node is skipped
+                                if (
+                                    isinstance(data, dict)
+                                    and data.get("message_id") == message_id
+                                ):
+                                    break
+                    except TimeoutError:
+                        continue
+                    result = data.get("result")
+                    if "error_code" in data or not isinstance(result, dict):
+                        continue
+                    values = {
+                        path: result[path]
+                        for path in THREAD_COUNTER_PATHS
+                        if isinstance(result.get(path), int)
+                    }
+                    if values:
+                        self._live_counters[nid] = values
+                        updated = True
+        except (aiohttp.ClientError, TimeoutError, ConnectionError) as err:
+            _LOGGER.debug("Live counter read failed: %s", err)
+        finally:
+            await session.close()
+        return updated
 
     async def _auto_recovery_loop(self) -> None:
         """Periodically try to recover offline nodes."""
@@ -437,16 +539,18 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 node_info["neighbors"] = 0
                 node_info["children"] = 0
 
-            # Thread error counters (cluster 53)
-            tx_retry = self._get_matter_attr(attributes, 53, 25, 0) or 0
-            tx_err_cca = self._get_matter_attr(attributes, 53, 28, 0) or 0
-            tx_err_abort = self._get_matter_attr(attributes, 53, 29, 0) or 0
-            tx_err_busy = self._get_matter_attr(attributes, 53, 30, 0) or 0
-            rx_err_no_frame = self._get_matter_attr(attributes, 53, 42, 0) or 0
-            rx_err_unknown = self._get_matter_attr(attributes, 53, 43, 0) or 0
-            rx_err_invalid = self._get_matter_attr(attributes, 53, 44, 0) or 0
-            rx_err_sec = self._get_matter_attr(attributes, 53, 45, 0) or 0
-            rx_err_fcs = self._get_matter_attr(attributes, 53, 46, 0) or 0
+            # Thread error counters (cluster 53). Values read live from the
+            # device win over the Matter Server cache, which goes stale.
+            counters = {**attributes, **self._live_counters.get(node_id, {})}
+            tx_retry = self._get_matter_attr(counters, 53, 25, 0) or 0
+            tx_err_cca = self._get_matter_attr(counters, 53, 28, 0) or 0
+            tx_err_abort = self._get_matter_attr(counters, 53, 29, 0) or 0
+            tx_err_busy = self._get_matter_attr(counters, 53, 30, 0) or 0
+            rx_err_no_frame = self._get_matter_attr(counters, 53, 42, 0) or 0
+            rx_err_unknown = self._get_matter_attr(counters, 53, 43, 0) or 0
+            rx_err_invalid = self._get_matter_attr(counters, 53, 44, 0) or 0
+            rx_err_sec = self._get_matter_attr(counters, 53, 45, 0) or 0
+            rx_err_fcs = self._get_matter_attr(counters, 53, 46, 0) or 0
 
             total_errors = (tx_err_cca + tx_err_abort + tx_err_busy
                             + rx_err_no_frame + rx_err_unknown
@@ -849,15 +953,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) 
     async def handle_reset_counters(call: ServiceCall) -> None:
         """Reset Thread diagnostic counters for a node."""
         node_id = call.data["node_id"]
-        await _run_action(node_id, "Error Counter Reset", "send_command", {
+        await _run_action(node_id, "Error Counter Reset", "device_command", {
             "node_id": node_id, "endpoint_id": 0,
             "cluster_id": 53, "command_name": "ResetCounts", "payload": {},
         }, "Error Counter zurückgesetzt")
-        await coordinator.async_request_refresh()
-        hass.bus.async_fire(f"{DOMAIN}_action_result", {
-            "action": "reset_counters", "node_id": node_id,
-            "result": result,
-        })
+        # Show what the device reports now, not the stale server cache
+        await coordinator.async_refresh_live_counters([node_id])
         await coordinator.async_request_refresh()
 
     hass.services.async_register(
@@ -871,6 +972,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) 
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    coordinator.start_counter_refresh(entry)
     return True
 
 
@@ -878,6 +980,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry)
     """Unload a config entry."""
     coordinator: MatterSaverCoordinator = entry.runtime_data
     await coordinator.stop_auto_recovery()
+    coordinator.stop_counter_refresh()
     hass.services.async_remove(DOMAIN, "ping_node")
     hass.services.async_remove(DOMAIN, "interview_node")
     hass.services.async_remove(DOMAIN, "reset_counters")

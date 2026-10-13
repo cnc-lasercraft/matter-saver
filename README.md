@@ -87,6 +87,12 @@ Four custom Lovelace cards are bundled with the integration and loaded automatic
 | `matter_saver.interview_node` | Re-interview a node to refresh its data |
 | `matter_saver.reset_counters` | Reset Thread diagnostic error counters |
 
+### Error counters
+
+The Matter Server does not keep the Thread error counters current in its node cache, so Matter Saver reads them from the device: every 5 minutes for online, mains-powered Thread nodes, and right after a reset. Battery-powered (sleepy) devices are never polled; their counters show the last value the Matter Server cached.
+
+`reset_counters` sends the `ResetCounts` command of the Thread Network Diagnostics cluster. What it clears is up to the device firmware: some devices reject the command (the service then fails with the device's error), others accept it but keep their radio counters running. The table shows the values the device reports afterwards.
+
 ## License
 
 MIT
