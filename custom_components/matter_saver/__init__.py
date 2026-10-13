@@ -78,10 +78,6 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._first_refresh_done = False
         # Offline history: node_id -> list of {"start": iso, "end": iso|None, "duration_min": int}
         self.offline_history: dict[int, list[dict[str, Any]]] = {}
-        # Auto-recovery
-        self.auto_recovery_enabled = True
-        self._recovery_task: asyncio.Task | None = None
-        self._recovery_interval = 300  # 5 minutes
         # Live Thread counters: node_id -> {"0/53/<attr>": value}
         self._live_counters: dict[int, dict[str, Any]] = {}
         self._counter_task: asyncio.Task | None = None
@@ -95,7 +91,6 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.offline_history = {
                 int(k): v for k, v in data.get("offline_history", {}).items()
             }
-            self.auto_recovery_enabled = data.get("auto_recovery", True)
         self._store_loaded = True
 
     async def _async_save_log(self) -> None:
@@ -104,7 +99,6 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "entries": self.activity_log,
             "last_seen": self._last_seen,
             "offline_history": {str(k): v for k, v in self.offline_history.items()},
-            "auto_recovery": self.auto_recovery_enabled,
         })
 
     def add_log(self, level: str, node_id: int | None, name: str,
@@ -126,18 +120,6 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.async_set_updated_data(self.data)
         # Persist to disk
         self.hass.async_create_task(self._async_save_log())
-
-    async def start_auto_recovery(self) -> None:
-        """Start the auto-recovery background task."""
-        if self._recovery_task is not None:
-            self._recovery_task.cancel()
-        self._recovery_task = self.hass.async_create_task(self._auto_recovery_loop())
-
-    async def stop_auto_recovery(self) -> None:
-        """Stop the auto-recovery background task."""
-        if self._recovery_task is not None:
-            self._recovery_task.cancel()
-            self._recovery_task = None
 
     def start_counter_refresh(self, entry: ConfigEntry) -> None:
         """Start the background task that reads Thread counters live."""
@@ -228,46 +210,6 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         finally:
             await session.close()
         return updated
-
-    async def _auto_recovery_loop(self) -> None:
-        """Periodically try to recover offline nodes."""
-        # Wait for startup to complete before first recovery attempt
-        await asyncio.sleep(self._recovery_interval)
-        while True:
-            await asyncio.sleep(self._recovery_interval)
-            if not self.auto_recovery_enabled or self.data is None:
-                continue
-            offline_nodes = [
-                n for n in self.data.get("nodes", [])
-                if not n["available"]
-            ]
-            for node in offline_nodes:
-                nid = node["node_id"]
-                name = node.get("device_name") or f"Node {nid}"
-                try:
-                    # Try ping first
-                    result = await self.send_matter_command(
-                        "ping_node", {"node_id": nid}
-                    )
-                    if isinstance(result, dict) and "error" in result:
-                        self.add_log("action", nid, name,
-                                     f"Auto-Recovery: Ping fehlgeschlagen")
-                        continue
-                    self.add_log("action", nid, name,
-                                 "Auto-Recovery: Ping OK, starte Re-Interview")
-                    # Ping worked, try interview
-                    result = await self.send_matter_command(
-                        "interview_node", {"node_id": nid}
-                    )
-                    if isinstance(result, dict) and "error" in result:
-                        self.add_log("error", nid, name,
-                                     f"Auto-Recovery: Re-Interview fehlgeschlagen")
-                    else:
-                        self.add_log("success", nid, name,
-                                     "Auto-Recovery: Re-Interview erfolgreich")
-                        await self.async_request_refresh()
-                except Exception:
-                    pass  # Don't crash the loop
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Matter Server."""
@@ -979,7 +921,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) 
 async def async_unload_entry(hass: HomeAssistant, entry: MatterSaverConfigEntry) -> bool:
     """Unload a config entry."""
     coordinator: MatterSaverCoordinator = entry.runtime_data
-    await coordinator.stop_auto_recovery()
     coordinator.stop_counter_refresh()
     hass.services.async_remove(DOMAIN, "ping_node")
     hass.services.async_remove(DOMAIN, "interview_node")

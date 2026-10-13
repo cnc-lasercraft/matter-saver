@@ -10,7 +10,6 @@ Custom Component for Home Assistant to monitor and manage Matter/Thread devices.
 - **Thread Topology** - Visual tree of routers and their connected end devices
 - **Action Popup** - Ping, Re-Interview, Reset Error Counters per device
 - **Smart Recommendations** - Context-aware repair suggestions based on what was already tried
-- **Auto-Recovery** - Automatically pings and re-interviews offline nodes every 5 minutes
 - **Activity Log** - Persistent log of all status changes and actions with timestamps
 - **Offline History** - Track how often and how long each device was offline (7d/30d stats)
 - **Matter Server Restart** - One-click restart of the Matter Server addon when needed
