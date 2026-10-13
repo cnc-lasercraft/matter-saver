@@ -56,6 +56,15 @@ class MatterSaverCard extends HTMLElement {
           }
           .ms-search:focus { border-color: var(--primary-color, #03a9f4); }
           .ms-search::placeholder { color: var(--secondary-text-color, #999); }
+          /* Mirror scrollbar above the table, see _initTopScrollbar() */
+          .ms-hscroll {
+            display: none; overflow-x: auto; overflow-y: hidden;
+            position: sticky; z-index: 1;
+            top: calc(var(--header-height, 56px) + var(--safe-area-inset-top, 0px));
+            background: var(--ha-card-background, var(--card-background-color, #1c1c1c));
+          }
+          .ms-hscroll.show { display: block; }
+          .ms-hscroll > div { height: 1px; }
           .ms-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
           .ms-table th {
             text-align: left; padding: 8px 12px; cursor: pointer; user-select: none;
@@ -166,7 +175,8 @@ class MatterSaverCard extends HTMLElement {
         <div class="ms-search-wrap">
           <input type="text" class="ms-search" id="ms-search" placeholder="Filter devices..." />
         </div>
-        <div class="card-content" style="padding: 0 8px 16px; overflow-x: auto;">
+        <div class="ms-hscroll" id="ms-hscroll"><div></div></div>
+        <div class="card-content" id="ms-content" style="padding: 0 8px 16px; overflow-x: auto;">
           <table class="ms-table">
             <thead id="ms-thead"></thead>
             <tbody id="ms-tbody"></tbody>
@@ -190,6 +200,8 @@ class MatterSaverCard extends HTMLElement {
         </div>
       </ha-card>
     `;
+
+    this._initTopScrollbar();
 
     // Sort header clicks
     this.querySelector("#ms-thead").addEventListener("click", (e) => {
@@ -529,6 +541,7 @@ class MatterSaverCard extends HTMLElement {
         tbodyEl.innerHTML = this._groupDevices(sorted, CC);
       }
     }
+    if (this._syncTopScrollbar) this._syncTopScrollbar();
   }
 
   _th(field, label) {
@@ -687,7 +700,38 @@ class MatterSaverCard extends HTMLElement {
     return div.innerHTML;
   }
 
+  // The table's own horizontal scrollbar sits below the last row — with a long
+  // device list that is thousands of pixels down, out of reach for anyone with
+  // a plain mouse wheel. A second scrollbar above the table mirrors it and
+  // sticks under the header while scrolling. Shown only when the table overflows.
+  // Where the system draws overlay scrollbars (macOS, touch) it collapses to a
+  // 1px strip — there, swiping over the table scrolls it anyway.
+  _initTopScrollbar() {
+    const content = this.querySelector("#ms-content");
+    const bar = this.querySelector("#ms-hscroll");
+    const spacer = bar.firstElementChild;
+    // The equality check ends the ping-pong between the two scroll events
+    const sync = (from, to) => {
+      if (to.scrollLeft !== from.scrollLeft) to.scrollLeft = from.scrollLeft;
+    };
+    bar.addEventListener("scroll", () => sync(bar, content));
+    content.addEventListener("scroll", () => sync(content, bar));
+    this._syncTopScrollbar = () => {
+      bar.classList.toggle("show", content.scrollWidth > content.clientWidth + 1);
+      spacer.style.width = `${content.scrollWidth}px`;
+    };
+    if (this._resizeObserver) this._resizeObserver.disconnect();
+    this._resizeObserver = new ResizeObserver(this._syncTopScrollbar);
+    this._resizeObserver.observe(content);
+    this._resizeObserver.observe(content.querySelector("table"));
+  }
+
   getCardSize() { return 8; }
+
+  // Sections view: use the full width of the section instead of one column.
+  getGridOptions() {
+    return { columns: "full", rows: "auto", min_columns: 6 };
+  }
 }
 
 // Register only once HA's frontend is up. HA's app.js installs the scoped
