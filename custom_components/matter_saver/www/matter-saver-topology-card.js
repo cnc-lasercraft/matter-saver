@@ -202,11 +202,15 @@ class MatterSaverTopologyCard extends HTMLElement {
   getCardSize() { return 8; }
 }
 
-// Register only once the frontend is loaded. HA's app.js installs the scoped
+// Register only once HA's frontend is up. HA's app.js installs the scoped
 // custom element registry polyfill, which replaces customElements with its own
 // map. A module from extra_module_url can run before app.js; defining then puts
 // the element in the native registry only, where Lovelace's customElements.get()
 // cannot see it -> "configuration error" until the page is reloaded.
+// The page's load event is not that moment: HA pulls in its frontend with
+// dynamic imports, which do not hold load back, so on a slow or uncached load
+// it fires before app.js has run. HA's own root element is the reliable signal;
+// once it is defined, the polyfilled registry is in place.
 function registerMatterSaverTopologyCard() {
   if (customElements.get("matter-saver-topology-card")) return;
   try {
@@ -222,5 +226,7 @@ function registerMatterSaverTopologyCard() {
   });
 }
 
-if (document.readyState === "complete") registerMatterSaverTopologyCard();
-else window.addEventListener("load", registerMatterSaverTopologyCard, { once: true });
+(function whenFrontendReady() {
+  if (customElements.get("home-assistant")) registerMatterSaverTopologyCard();
+  else setTimeout(whenFrontendReady, 50);
+})();
