@@ -40,7 +40,20 @@ PLATFORMS = ["sensor"]
 # ThreadNetworkDiagnostics (cluster 53) counters shown as "errors"/"retries".
 # The Matter Server does not keep these current in its node cache (they are
 # not reported through the subscription), so they are read from the device.
-THREAD_COUNTER_ATTRS = (25, 28, 29, 30, 42, 43, 44, 45, 46)
+# Attribute IDs as in the Matter specification (TxRetryCount = 0x21 ...);
+# this table is the only place they are written down.
+THREAD_COUNTERS = {
+    "tx_retry": 33,          # 0x21 TxRetryCount
+    "tx_err_cca": 36,        # 0x24 TxErrCcaCount
+    "tx_err_abort": 37,      # 0x25 TxErrAbortCount
+    "tx_err_busy": 38,       # 0x26 TxErrBusyChannelCount
+    "rx_err_no_frame": 50,   # 0x32 RxErrNoFrameCount
+    "rx_err_unknown": 51,    # 0x33 RxErrUnknownNeighborCount
+    "rx_err_invalid": 52,    # 0x34 RxErrInvalidSrcAddrCount
+    "rx_err_sec": 53,        # 0x35 RxErrSecCount
+    "rx_err_fcs": 54,        # 0x36 RxErrFcsCount
+}
+THREAD_COUNTER_ATTRS = tuple(THREAD_COUNTERS.values())
 THREAD_COUNTER_PATHS = [f"0/53/{attr}" for attr in THREAD_COUNTER_ATTRS]
 # Roles that keep their radio on; sleepy end devices are never polled.
 THREAD_ALWAYS_ON_ROLES = ("end_device", "reed", "router", "leader")
@@ -484,15 +497,24 @@ class MatterSaverCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Thread error counters (cluster 53). Values read live from the
             # device win over the Matter Server cache, which goes stale.
             counters = {**attributes, **self._live_counters.get(node_id, {})}
-            tx_retry = self._get_matter_attr(counters, 53, 25, 0) or 0
-            tx_err_cca = self._get_matter_attr(counters, 53, 28, 0) or 0
-            tx_err_abort = self._get_matter_attr(counters, 53, 29, 0) or 0
-            tx_err_busy = self._get_matter_attr(counters, 53, 30, 0) or 0
-            rx_err_no_frame = self._get_matter_attr(counters, 53, 42, 0) or 0
-            rx_err_unknown = self._get_matter_attr(counters, 53, 43, 0) or 0
-            rx_err_invalid = self._get_matter_attr(counters, 53, 44, 0) or 0
-            rx_err_sec = self._get_matter_attr(counters, 53, 45, 0) or 0
-            rx_err_fcs = self._get_matter_attr(counters, 53, 46, 0) or 0
+            tx_retry = self._get_matter_attr(
+                counters, 53, THREAD_COUNTERS["tx_retry"], 0) or 0
+            tx_err_cca = self._get_matter_attr(
+                counters, 53, THREAD_COUNTERS["tx_err_cca"], 0) or 0
+            tx_err_abort = self._get_matter_attr(
+                counters, 53, THREAD_COUNTERS["tx_err_abort"], 0) or 0
+            tx_err_busy = self._get_matter_attr(
+                counters, 53, THREAD_COUNTERS["tx_err_busy"], 0) or 0
+            rx_err_no_frame = self._get_matter_attr(
+                counters, 53, THREAD_COUNTERS["rx_err_no_frame"], 0) or 0
+            rx_err_unknown = self._get_matter_attr(
+                counters, 53, THREAD_COUNTERS["rx_err_unknown"], 0) or 0
+            rx_err_invalid = self._get_matter_attr(
+                counters, 53, THREAD_COUNTERS["rx_err_invalid"], 0) or 0
+            rx_err_sec = self._get_matter_attr(
+                counters, 53, THREAD_COUNTERS["rx_err_sec"], 0) or 0
+            rx_err_fcs = self._get_matter_attr(
+                counters, 53, THREAD_COUNTERS["rx_err_fcs"], 0) or 0
 
             total_errors = (tx_err_cca + tx_err_abort + tx_err_busy
                             + rx_err_no_frame + rx_err_unknown
